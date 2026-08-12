@@ -20,6 +20,7 @@ class AppConfig:
     request_timeout_seconds: int
     history_path: Path
     recent_message_limit: int
+    max_agent_iterations: int
 
 
 def get_config() -> AppConfig:
@@ -36,4 +37,5 @@ def get_config() -> AppConfig:
         request_timeout_seconds=int(os.getenv("GROQ_TIMEOUT_SECONDS", "60")),
         history_path=history_path,
         recent_message_limit=int(os.getenv("RECENT_MESSAGE_LIMIT", "10")),
+        max_agent_iterations=int(os.getenv("MAX_AGENT_ITERATIONS", "4")),
     )

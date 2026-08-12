@@ -2,10 +2,10 @@ import logging
 
 import streamlit as st
 
+from agent.agent import run_agent
 from config import get_config
-from llm.groq_client import GroqClientError, stream_chat_completion
+from llm.groq_client import GroqClientError
 from memory.chat_memory import ChatMemory
-from prompts.system_prompt import SYSTEM_PROMPT
 
 
 logging.basicConfig(
@@ -20,8 +20,8 @@ def main() -> None:
         recent_message_limit=config.recent_message_limit,
     )
 
-    st.set_page_config(page_title="Stage 2 Memory Assistant", page_icon="AI", layout="centered")
-    st.title("Stage 2 Memory Assistant")
+    st.set_page_config(page_title="Stage 3 AI Agent", page_icon="AI", layout="centered")
+    st.title("Stage 3 AI Agent")
 
     if "messages" not in st.session_state:
         load_result = memory.load_history()
@@ -57,6 +57,9 @@ def main() -> None:
         st.caption(f"Persistent store: {config.history_path}")
         st.caption(f"Recent context limit: {config.recent_message_limit} messages")
 
+        st.header("Agent Runtime")
+        st.caption(f"Max iterations: {config.max_agent_iterations}")
+
         if st.button("Clear memory", type="secondary"):
             st.session_state.messages = memory.clear_history()
             st.rerun()
@@ -68,41 +71,59 @@ def main() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    user_question = st.chat_input("Ask a question")
-    if not user_question:
+    user_goal = st.chat_input("Give the agent a goal")
+    if not user_goal:
         return
 
-    memory.add_message(st.session_state.messages, "user", user_question)
+    memory.add_message(st.session_state.messages, "user", user_goal)
     memory.save_history(st.session_state.messages)
 
     with st.chat_message("user"):
-        st.markdown(user_question)
+        st.markdown(user_goal)
 
-    api_messages = memory.build_context(
-        system_prompt=SYSTEM_PROMPT,
-        messages=st.session_state.messages,
-    )
+    conversation_context = memory.get_recent_history(st.session_state.messages)
 
     with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        full_response = ""
+        status_placeholder = st.empty()
 
         try:
-            for token in stream_chat_completion(
+            status_placeholder.info("Agent is observing the goal and deciding what to do next...")
+            agent_state = run_agent(
                 config=config,
-                messages=api_messages,
+                goal=user_goal,
+                conversation_context=conversation_context,
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-            ):
-                full_response += token
-                response_placeholder.markdown(full_response)
+            )
 
         except GroqClientError as exc:
             st.error(str(exc))
             return
 
-    memory.add_message(st.session_state.messages, "assistant", full_response)
+        status_placeholder.empty()
+        st.markdown(agent_state.final_answer)
+
+        with st.expander("Agent Execution"):
+            st.write(
+                {
+                    "goal": agent_state.goal,
+                    "status": agent_state.status,
+                    "iterations": agent_state.iteration_count,
+                    "max_iterations": agent_state.max_iterations,
+                }
+            )
+            for step in agent_state.trace:
+                st.write(
+                    {
+                        "iteration": step.iteration,
+                        "action": step.action,
+                        "status": step.status,
+                        "observation": step.observation,
+                    }
+                )
+
+    memory.add_message(st.session_state.messages, "assistant", agent_state.final_answer)
     memory.save_history(st.session_state.messages)
 
 

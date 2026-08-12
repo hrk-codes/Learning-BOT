@@ -101,6 +101,30 @@ def stream_chat_completion(
         raise GroqClientError("The Groq request failed before a response was completed.") from exc
 
 
+def complete_chat_completion(
+    config: AppConfig,
+    messages: list[dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Collect a streamed response when the caller needs one complete value.
+
+    The Stage 3 agent needs a structured JSON decision before it can choose
+    the next runtime action. Streaming is still useful at the HTTP layer, but
+    the runtime should parse only after the full JSON text has arrived.
+    """
+    return "".join(
+        stream_chat_completion(
+            config=config,
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    )
+
+
 def _format_http_error(response: requests.Response) -> str:
     status_code = response.status_code
 
