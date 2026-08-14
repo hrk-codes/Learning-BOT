@@ -2,9 +2,11 @@ import logging
 import json
 from collections.abc import Callable
 
+from agent.action_router import route_action
 from agent.agent_state import AgentState, AgentTraceStep
-from agent.decision_schema import AgentDecision, DecisionParseError, parse_agent_decision
+from agent.decision_schema import DecisionParseError, parse_agent_decision
 from prompts.agent_prompt import AGENT_SYSTEM_PROMPT
+from tools.manager import ToolManager
 
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ def run_agent_loop(
     conversation_context: list[dict[str, str]],
     max_iterations: int,
     llm_decision_fn: LLMDecisionFn,
+    tool_manager: ToolManager,
 ) -> AgentState:
     state = AgentState(goal=goal, max_iterations=max_iterations)
     logger.info("AGENT START goal=%s max_iterations=%s", goal, max_iterations)
@@ -45,8 +48,9 @@ def run_agent_loop(
                 conversation_context=conversation_context,
                 observation=observation,
                 llm_decision_fn=llm_decision_fn,
+                tool_manager=tool_manager,
             )
-            execute_internal_action(state, decision)
+            route_action(state, decision, tool_manager)
         except (DecisionParseError, AgentRuntimeError) as exc:
             state.status = "error"
             state.final_answer = f"The agent stopped safely because its decision step failed: {exc}"
@@ -77,33 +81,19 @@ def decide(
     conversation_context: list[dict[str, str]],
     observation: str,
     llm_decision_fn: LLMDecisionFn,
-) -> AgentDecision:
-    context = build_agent_context(state, conversation_context, observation)
+    tool_manager: ToolManager,
+):
+    context = build_agent_context(state, conversation_context, observation, tool_manager)
+    state.llm_call_count += 1
     raw_decision = llm_decision_fn(context)
     return parse_agent_decision(raw_decision)
-
-
-def execute_internal_action(state: AgentState, decision: AgentDecision) -> None:
-    state.record_action_result(decision.content)
-    state.record_trace(
-        AgentTraceStep(
-            iteration=state.iteration_count,
-            observation=state.observations[-1],
-            action=decision.action,
-            status=decision.status,
-            content=decision.content,
-        )
-    )
-
-    if decision.finished:
-        state.status = "completed"
-        state.final_answer = decision.content
 
 
 def build_agent_context(
     state: AgentState,
     conversation_context: list[dict[str, str]],
     observation: str,
+    tool_manager: ToolManager,
 ) -> list[dict[str, str]]:
     visible_trace = [
         {
@@ -111,6 +101,8 @@ def build_agent_context(
             "action": step.action,
             "status": step.status,
             "content": step.content,
+            "tool_name": step.tool_name,
+            "tool_result": step.tool_result,
         }
         for step in state.trace
     ]
@@ -124,6 +116,7 @@ def build_agent_context(
         "max_iterations": state.max_iterations,
         "current_observation": observation,
         "previous_steps": visible_trace,
+        "active_tools": tool_manager.get_active_tool_descriptions(),
     }
 
     return [
@@ -134,6 +127,8 @@ def build_agent_context(
             "content": (
                 "Make the next agent decision from this state. "
                 "Return only JSON.\n\n"
+                "If a tool is needed, use action=TOOL_CALL with tool_name and tool_arguments. "
+                "Only request tools listed in active_tools.\n\n"
                 f"Agent state:\n{json.dumps(agent_state_summary, indent=2)}"
             ),
         },

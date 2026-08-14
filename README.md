@@ -1,10 +1,10 @@
-# Stage 3 AI Agent
+# Stage 4 Tool Agent
 
-Small Streamlit assistant that sends chat messages to Groq with raw HTTP/JSON, conversation memory, and a tool-free AI agent runtime.
+Small Streamlit assistant that sends chat messages to Groq with raw HTTP/JSON, conversation memory, an agent runtime, and a controlled tool-calling architecture.
 
 ## Where It Fits
 
-User -> Chat UI -> Memory Layer -> Agent State -> Agent Runtime -> LLM Decision -> Internal Action -> State Update -> Finish -> Memory Update -> UI
+User -> Chat UI -> Memory Layer -> Agent State -> Agent Runtime -> LLM Decision -> Internal Action or Tool Call -> Tool Registry -> Tool Result -> State Update -> Finish -> Memory Update -> UI
 
 ## File Responsibilities
 
@@ -13,12 +13,17 @@ User -> Chat UI -> Memory Layer -> Agent State -> Agent Runtime -> LLM Decision 
 - `agent/agent.py`: Connects the app and config to the agent runtime.
 - `agent/agent_loop.py`: Observe, decide, act, update state, and terminate.
 - `agent/agent_state.py`: Current goal, iteration count, status, observations, action results, and trace.
-- `agent/decision_schema.py`: Structured JSON contract between the LLM and runtime.
+- `agent/decision_schema.py`: Structured JSON contract between the LLM and runtime, including `TOOL_CALL`.
+- `agent/action_router.py`: Routes decisions to internal actions, tool execution, or finish handling.
 - `llm/groq_client.py`: Raw HTTP/JSON request to Groq and streaming response parsing.
 - `memory/chat_memory.py`: Load, validate, save, clear, and select conversation memory.
 - `memory/history.json`: Inspectable persistent conversation history.
 - `prompts/agent_prompt.py`: Agent decision instructions and allowed actions.
 - `prompts/system_prompt.py`: Stage 2 chat prompt kept for comparison.
+- `tools/base.py`: Common tool contract and result format.
+- `tools/registry.py`: Runtime catalog of known tools.
+- `tools/manager.py`: Active toolbox and permission boundary.
+- `tools/calculator`, `tools/weather`, `tools/search`: Trusted local tool implementations.
 
 ## Memory Model
 
@@ -47,7 +52,7 @@ selected recent messages = desk
 LLM = person reading what is on the desk
 ```
 
-## Agent Model
+## Agent And Tool Model
 
 Memory answers: what should be retained?
 
@@ -66,14 +71,36 @@ repeat or finish
 
 The loop is not the intelligence. The loop is the orchestration mechanism. The LLM decides the next action, and Python enforces the allowed actions, parse rules, state updates, and termination limits.
 
-Allowed Stage 3 actions:
+Allowed Stage 4 actions:
 
 - `ANALYZE`
 - `PLAN`
 - `CONTINUE`
+- `TOOL_CALL`
 - `FINISH`
 
-Stage 4 can add `TOOL_CALL` in the same decision schema, but Stage 3 deliberately has no external tools.
+A tool is a controlled capability exposed through a contract. The LLM chooses what capability it wants, but the runtime decides whether the tool is active, whether arguments match the schema, whether permissions allow it, and how execution happens.
+
+Tool calling flow:
+
+```text
+LLM decision
+-> TOOL_CALL request
+-> tool manager checks active tools
+-> tool validates JSON arguments
+-> permission check
+-> executor runs the tool
+-> structured tool result becomes an observation
+-> LLM decides whether to continue or finish
+```
+
+Important distinction:
+
+```text
+Tool result != final answer
+```
+
+The agent must observe the tool result and then decide what to tell the user.
 
 ## Setup
 
@@ -120,6 +147,9 @@ Stage 4 can add `TOOL_CALL` in the same decision schema, but Stage 3 deliberatel
 - Agent goals live in `AgentState`.
 - Agent decisions are structured JSON, not arbitrary text parsing.
 - Maximum iterations prevent accidental infinite loops.
+- Tool contracts describe name, description, input schema, output schema, permission, timeout, and version.
+- JSON Schema protects the runtime from invalid model-generated arguments.
+- Dashboard-enabled tools form the active tool set sent to the LLM.
 - Temperature changes response variety.
 - Max tokens limits response length.
 - Streaming sends the response piece by piece.
@@ -132,9 +162,10 @@ Stage 4 can add `TOOL_CALL` in the same decision schema, but Stage 3 deliberatel
 python -m compileall .
 python test_memory.py
 python test_agent.py
+python test_tools.py
 ```
 
-## How To Check Stage 3
+## How To Check Stage 4
 
 1. Run the app:
 
@@ -142,26 +173,56 @@ python test_agent.py
    streamlit run app.py
    ```
 
-2. Try a simple goal:
+2. Try a no-tool goal:
 
    ```text
-   Give me three Python interview topics.
+   Explain recursion.
    ```
 
-   Expected: the agent may finish in one iteration.
+   Expected: the agent should normally answer without a tool call.
 
-3. Try a multi-step goal:
+3. Try calculator:
 
    ```text
-   Create a plan, check whether it covers Python, LLMs, APIs, memory, and agents, then improve it if something is missing.
+   What is 12345 * 678?
    ```
 
-   Expected: open `Agent Execution` and see multiple iterations such as `ANALYZE`, `PLAN`, and `FINISH`.
+   Expected: open `Agent Execution` and look for `TOOL_CALL` with `calculator.evaluate`, followed by a final answer.
 
-4. Check memory:
+4. Try weather:
+
+   ```text
+   What's the current weather in Delhi?
+   ```
+
+   Expected: `TOOL_CALL` with `weather.get_current`, then a final answer based on the tool result.
+
+5. Try disabled tool behavior:
+
+   Disable `weather.get_current` in the sidebar toolbox, then ask for weather again.
+
+   Expected: the agent should not execute weather. The trace should show the tool is disabled or the answer should explain the capability is unavailable.
+
+6. Try multi-tool behavior:
+
+   ```text
+   Find current weather for Delhi and calculate the Fahrenheit equivalent.
+   ```
+
+   Expected: the agent can call weather, then calculator, then finish.
+
+7. Check memory:
 
    Open `Inspect memory` in the sidebar. You should see both the user goal and the final assistant answer stored.
 
-5. Check persistence:
+8. Check persistence:
 
    Restart Streamlit and verify the previous conversation reloads from local memory.
+
+9. Check local tests:
+
+   ```powershell
+   python test_memory.py
+   python test_agent.py
+   python test_tools.py
+   ```

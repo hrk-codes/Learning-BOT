@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 from typing import Literal
 
 
@@ -12,6 +13,10 @@ class AgentTraceStep:
     action: str
     status: str
     content: str
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] | None = None
+    tool_result: dict[str, Any] | None = None
+    elapsed_seconds: float = 0.0
 
 
 @dataclass
@@ -24,6 +29,9 @@ class AgentState:
     observations: list[str] = field(default_factory=list)
     action_results: list[str] = field(default_factory=list)
     trace: list[AgentTraceStep] = field(default_factory=list)
+    llm_call_count: int = 0
+    tool_call_count: int = 0
+    total_tool_latency_seconds: float = 0.0
 
     def record_observation(self, observation: str) -> None:
         self.observations.append(observation)

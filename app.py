@@ -6,6 +6,8 @@ from agent.agent import run_agent
 from config import get_config
 from llm.groq_client import GroqClientError
 from memory.chat_memory import ChatMemory
+from tools.factory import build_default_registry
+from tools.manager import ToolManager
 
 
 logging.basicConfig(
@@ -19,15 +21,18 @@ def main() -> None:
         history_path=config.history_path,
         recent_message_limit=config.recent_message_limit,
     )
+    tool_registry = build_default_registry()
 
-    st.set_page_config(page_title="Stage 3 AI Agent", page_icon="AI", layout="centered")
-    st.title("Stage 3 AI Agent")
+    st.set_page_config(page_title="Stage 4 Tool Agent", page_icon="AI", layout="centered")
+    st.title("Stage 4 Tool Agent")
 
     if "messages" not in st.session_state:
         load_result = memory.load_history()
         st.session_state.messages = load_result.messages
         if load_result.warning:
             st.warning(load_result.warning)
+    if "enabled_tools" not in st.session_state:
+        st.session_state.enabled_tools = {tool.name for tool in tool_registry.list_tools()}
 
     with st.sidebar:
         st.header("Model Settings")
@@ -60,6 +65,21 @@ def main() -> None:
         st.header("Agent Runtime")
         st.caption(f"Max iterations: {config.max_agent_iterations}")
 
+        st.header("Agent Toolbox")
+        for tool in tool_registry.list_tools():
+            enabled = st.checkbox(
+                tool.name,
+                value=tool.name in st.session_state.enabled_tools,
+                help=f"{tool.description} Permission: {tool.permission}",
+            )
+            if enabled:
+                st.session_state.enabled_tools.add(tool.name)
+            else:
+                st.session_state.enabled_tools.discard(tool.name)
+
+        with st.expander("Available tool contracts"):
+            st.json([tool.to_model_description() for tool in tool_registry.list_tools()])
+
         if st.button("Clear memory", type="secondary"):
             st.session_state.messages = memory.clear_history()
             st.rerun()
@@ -82,6 +102,10 @@ def main() -> None:
         st.markdown(user_goal)
 
     conversation_context = memory.get_recent_history(st.session_state.messages)
+    tool_manager = ToolManager(
+        registry=tool_registry,
+        enabled_tools=set(st.session_state.enabled_tools),
+    )
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
@@ -95,6 +119,7 @@ def main() -> None:
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                tool_manager=tool_manager,
             )
 
         except GroqClientError as exc:
@@ -111,17 +136,25 @@ def main() -> None:
                     "status": agent_state.status,
                     "iterations": agent_state.iteration_count,
                     "max_iterations": agent_state.max_iterations,
+                    "llm_calls": agent_state.llm_call_count,
+                    "tool_calls": agent_state.tool_call_count,
+                    "tool_latency_seconds": round(agent_state.total_tool_latency_seconds, 4),
+                    "active_tools": sorted(st.session_state.enabled_tools),
                 }
             )
             for step in agent_state.trace:
-                st.write(
-                    {
-                        "iteration": step.iteration,
-                        "action": step.action,
-                        "status": step.status,
-                        "observation": step.observation,
-                    }
-                )
+                trace_data = {
+                    "iteration": step.iteration,
+                    "action": step.action,
+                    "status": step.status,
+                    "observation": step.observation,
+                }
+                if step.tool_name:
+                    trace_data["tool_name"] = step.tool_name
+                    trace_data["tool_arguments"] = step.tool_arguments
+                    trace_data["tool_result"] = step.tool_result
+                    trace_data["elapsed_seconds"] = round(step.elapsed_seconds, 4)
+                st.write(trace_data)
 
     memory.add_message(st.session_state.messages, "assistant", agent_state.final_answer)
     memory.save_history(st.session_state.messages)

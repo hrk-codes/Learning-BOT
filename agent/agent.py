@@ -2,6 +2,7 @@ from config import AppConfig
 from agent.agent_loop import run_agent_loop
 from agent.agent_state import AgentState
 from llm.groq_client import complete_chat_completion
+from tools.manager import ToolManager
 
 
 def run_agent(
@@ -11,6 +12,7 @@ def run_agent(
     model: str,
     temperature: float,
     max_tokens: int,
+    tool_manager: ToolManager,
 ) -> AgentState:
     def ask_llm(messages: list[dict[str, str]]) -> str:
         return complete_chat_completion(
@@ -26,4 +28,5 @@ def run_agent(
         conversation_context=conversation_context,
         max_iterations=config.max_agent_iterations,
         llm_decision_fn=ask_llm,
+        tool_manager=tool_manager,
     )

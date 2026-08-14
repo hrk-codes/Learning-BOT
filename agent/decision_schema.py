@@ -1,10 +1,10 @@
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
-AllowedAction = Literal["ANALYZE", "PLAN", "CONTINUE", "FINISH"]
-ALLOWED_ACTIONS = {"ANALYZE", "PLAN", "CONTINUE", "FINISH"}
+AllowedAction = Literal["ANALYZE", "PLAN", "CONTINUE", "TOOL_CALL", "FINISH"]
+ALLOWED_ACTIONS = {"ANALYZE", "PLAN", "CONTINUE", "TOOL_CALL", "FINISH"}
 
 
 class DecisionParseError(Exception):
@@ -17,6 +17,8 @@ class AgentDecision:
     content: str
     finished: bool
     status: str
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] | None = None
 
 
 def parse_agent_decision(raw_text: str) -> AgentDecision:
@@ -27,6 +29,8 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
     content = data.get("content")
     finished = data.get("finished")
     status = data.get("status", "")
+    tool_name = data.get("tool_name")
+    tool_arguments = data.get("tool_arguments")
 
     if action not in ALLOWED_ACTIONS:
         raise DecisionParseError(f"Unknown action: {action!r}")
@@ -34,6 +38,14 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
         raise DecisionParseError("Decision content must be a non-empty string.")
     if not isinstance(finished, bool):
         raise DecisionParseError("Decision finished must be true or false.")
+    if action == "TOOL_CALL":
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise DecisionParseError("TOOL_CALL decisions must include tool_name.")
+        if not isinstance(tool_arguments, dict):
+            raise DecisionParseError("TOOL_CALL decisions must include tool_arguments as an object.")
+    elif tool_name is not None or tool_arguments is not None:
+        raise DecisionParseError("Only TOOL_CALL decisions may include tool_name or tool_arguments.")
+
     if action == "FINISH" and not finished:
         raise DecisionParseError("FINISH decisions must set finished=true.")
     if action != "FINISH" and finished:
@@ -44,6 +56,8 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
         content=content.strip(),
         finished=finished,
         status=str(status).strip() or "decision accepted",
+        tool_name=tool_name.strip() if isinstance(tool_name, str) else None,
+        tool_arguments=tool_arguments,
     )
 
 
