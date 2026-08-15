@@ -1,228 +1,193 @@
-# Stage 4 Tool Agent
+# Stage 5 RAG Agent
 
-Small Streamlit assistant that sends chat messages to Groq with raw HTTP/JSON, conversation memory, an agent runtime, and a controlled tool-calling architecture.
+A small Streamlit AI agent built from first principles with Groq, conversation memory,
+a controlled tool runtime, and a local retrieval-augmented knowledge layer.
 
-## Where It Fits
-
-User -> Chat UI -> Memory Layer -> Agent State -> Agent Runtime -> LLM Decision -> Internal Action or Tool Call -> Tool Registry -> Tool Result -> State Update -> Finish -> Memory Update -> UI
-
-## File Responsibilities
-
-- `app.py`: Streamlit UI, message flow, memory controls, and response display.
-- `config.py`: API keys, model defaults, timeout, history path, and recent-message limit.
-- `agent/agent.py`: Connects the app and config to the agent runtime.
-- `agent/agent_loop.py`: Observe, decide, act, update state, and terminate.
-- `agent/agent_state.py`: Current goal, iteration count, status, observations, action results, and trace.
-- `agent/decision_schema.py`: Structured JSON contract between the LLM and runtime, including `TOOL_CALL`.
-- `agent/action_router.py`: Routes decisions to internal actions, tool execution, or finish handling.
-- `llm/groq_client.py`: Raw HTTP/JSON request to Groq and streaming response parsing.
-- `memory/chat_memory.py`: Load, validate, save, clear, and select conversation memory.
-- `memory/history.json`: Inspectable persistent conversation history.
-- `prompts/agent_prompt.py`: Agent decision instructions and allowed actions.
-- `prompts/system_prompt.py`: Stage 2 chat prompt kept for comparison.
-- `tools/base.py`: Common tool contract and result format.
-- `tools/registry.py`: Runtime catalog of known tools.
-- `tools/manager.py`: Active toolbox and permission boundary.
-- `tools/calculator`, `tools/weather`, `tools/search`: Trusted local tool implementations.
-
-## Memory Model
-
-Memory is stored information. Context is the selected information sent to the LLM for the current request.
-
-This project uses two memory positions:
-
-- Session memory: `st.session_state`, which keeps the current UI conversation alive while Streamlit is running.
-- Persistent memory: `memory/history.json`, which keeps the conversation available after restarting the app.
-
-The context builder does not send the entire history. It sends:
+Stage 5 does not create a separate PDF chatbot. It adds knowledge retrieval as one
+decision available to the existing agent:
 
 ```text
-system prompt
-+
-latest N user/assistant messages
+User goal
+  -> Agent decision
+     -> answer directly
+     -> RETRIEVE_KNOWLEDGE
+     -> TOOL_CALL
+     -> continue
+     -> finish
 ```
 
-This recent-message window is simple and transparent. It can lose older details in long conversations, but it teaches the core context-window problem before adding summarization or semantic retrieval.
-
-Storage capacity is not the same as context-window capacity:
+## Core Distinctions
 
 ```text
-history.json = library
-selected recent messages = desk
-LLM = person reading what is on the desk
+Memory -> information from the conversation
+RAG    -> evidence from indexed reference documents
+Tools  -> capabilities that perform actions
+LLM    -> language generation and structured decisions
 ```
 
-## Agent And Tool Model
+RAG does not train or fine-tune the LLM. It retrieves relevant text and deliberately
+places that evidence into the model context for one answer.
 
-Memory answers: what should be retained?
+## Two Pipelines
 
-Agent state answers: what is happening during this current execution?
-
-The Stage 3 loop is:
+Ingestion happens when a PDF is added:
 
 ```text
-observe
-decide with LLM
-parse structured JSON decision
-execute internal action
-update state
-repeat or finish
+PDF -> validate -> save original -> parse pages -> chunk -> metadata
+    -> embed once -> store vectors
 ```
 
-The loop is not the intelligence. The loop is the orchestration mechanism. The LLM decides the next action, and Python enforces the allowed actions, parse rules, state updates, and termination limits.
-
-Allowed Stage 4 actions:
-
-- `ANALYZE`
-- `PLAN`
-- `CONTINUE`
-- `TOOL_CALL`
-- `FINISH`
-
-A tool is a controlled capability exposed through a contract. The LLM chooses what capability it wants, but the runtime decides whether the tool is active, whether arguments match the schema, whether permissions allow it, and how execution happens.
-
-Tool calling flow:
+Retrieval happens when the agent requests document knowledge:
 
 ```text
-LLM decision
--> TOOL_CALL request
--> tool manager checks active tools
--> tool validates JSON arguments
--> permission check
--> executor runs the tool
--> structured tool result becomes an observation
--> LLM decides whether to continue or finish
+Question -> normalize -> embed query -> cosine search -> top-k chunks
+         -> grounded observation -> agent -> answer + sources
 ```
 
-Important distinction:
+Document embeddings are not recomputed for every question. Query time creates one
+query vector and compares it with the stored chunk vectors.
+
+## Project Structure
 
 ```text
-Tool result != final answer
+app.py                         Streamlit chat, knowledge UI, and debug views
+agent/                         State, decisions, routing, and bounded agent loop
+memory/                        Conversation memory
+tools/                         Calculator, weather, search, registry, and permissions
+rag/ingestion/                 PDF validation, parsing, cleaning, and chunking
+rag/embeddings/embedder.py     Local text-to-vector boundary
+rag/storage/vector_store.py    Inspectable JSON vectors and cosine search
+rag/retrieval/retriever.py     Query processing and ranked structured results
+rag/context/context_builder.py Grounded evidence and source construction
+rag/pipeline.py                RAG orchestration and document lifecycle
+documents/raw/                 Uploaded source-of-truth PDFs, ignored by Git
+documents/sample/              Controlled PDFs for testing
+vector_store/                  Generated retrieval index, ignored by Git
 ```
 
-The agent must observe the tool result and then decide what to tell the user.
+The implementation uses:
+
+- `pypdf` for text-based PDF extraction. Scanned PDFs need future OCR support.
+- `sentence-transformers/all-MiniLM-L6-v2` for local 384-dimensional embeddings.
+- A JSON vector store with explicit cosine similarity for a small learning corpus.
+- Deterministic 1,200-character chunks with 200-character overlap by default.
+
+The JSON index is intentionally simple and inspectable. FAISS, Chroma, Qdrant,
+Weaviate, Pinecone, or pgvector become preferable when corpus size, filtering,
+concurrency, durability, or distributed deployment outgrow a local learning system.
 
 ## Setup
 
-1. Create a virtual environment.
-
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
-
-2. Install dependencies.
-
-   ```powershell
-   pip install -r requirements.txt
-   ```
-
-3. Create `.env` from `.env.example` and add your key.
-
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-
-   Then edit `.env`:
-
-   ```text
-   GROQ_API_KEY=your-real-key
-   ```
-
-4. Run the app.
-
-   ```powershell
-   streamlit run app.py
-   ```
-
-## What This Teaches
-
-- API keys stay outside source code.
-- HTTP requests use headers and JSON bodies.
-- Chat models receive messages with roles.
-- User and assistant messages must both be stored for continuity.
-- Persistent storage can be simple JSON before it needs a database.
-- Context construction selects useful memory for the current request.
-- Context should be limited instead of blindly sending all history.
-- Agent goals live in `AgentState`.
-- Agent decisions are structured JSON, not arbitrary text parsing.
-- Maximum iterations prevent accidental infinite loops.
-- Tool contracts describe name, description, input schema, output schema, permission, timeout, and version.
-- JSON Schema protects the runtime from invalid model-generated arguments.
-- Dashboard-enabled tools form the active tool set sent to the LLM.
-- Temperature changes response variety.
-- Max tokens limits response length.
-- Streaming sends the response piece by piece.
-- Errors should be handled clearly.
-- Logs should explain failures without exposing secrets.
-
-## Local Checks
-
 ```powershell
-python -m compileall .
-python test_memory.py
-python test_agent.py
-python test_tools.py
+cd "C:\Users\hrkgh\Agent learn\BOT 1"
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-## How To Check Stage 4
+Put the Groq key in `.env`:
 
-1. Run the app:
+```text
+GROQ_API_KEY=your-real-key
+```
 
-   ```powershell
-   streamlit run app.py
-   ```
+Start the app:
 
-2. Try a no-tool goal:
+```powershell
+streamlit run app.py
+```
 
-   ```text
-   Explain recursion.
-   ```
+The first PDF indexing run downloads the local embedding model. Later runs reuse the
+cached model and stored document vectors.
 
-   Expected: the agent should normally answer without a tool call.
+The project disables Streamlit's automatic source watcher because it probes optional
+Transformers vision modules and produces misleading `torchvision` errors in a text-only
+app. Restart Streamlit manually after changing Python files.
 
-3. Try calculator:
+## How To Check Stage 5
 
-   ```text
-   What is 12345 * 678?
-   ```
+1. Open `http://localhost:8501` and confirm the title is `Stage 5 RAG Agent`.
 
-   Expected: open `Agent Execution` and look for `TOOL_CALL` with `calculator.evaluate`, followed by a final answer.
+2. In `Knowledge Base`, upload `documents/sample/employee-handbook.pdf` and click
+   `Index PDF`. Verify the status passes through upload, parsing, chunking, embedding,
+   indexing, and completion. The document should show `indexed`, one page, at least one
+   chunk, an embedding count, content hash, version, and page metadata.
 
-4. Try weather:
-
-   ```text
-   What's the current weather in Delhi?
-   ```
-
-   Expected: `TOOL_CALL` with `weather.get_current`, then a final answer based on the tool result.
-
-5. Try disabled tool behavior:
-
-   Disable `weather.get_current` in the sidebar toolbox, then ask for weather again.
-
-   Expected: the agent should not execute weather. The trace should show the tool is disabled or the answer should explain the capability is unavailable.
-
-6. Try multi-tool behavior:
+3. Ask:
 
    ```text
-   Find current weather for Delhi and calculate the Fahrenheit equivalent.
+   According to the employee handbook, how many unused leave days can I take into next year?
    ```
 
-   Expected: the agent can call weather, then calculator, then finish.
+   Expected: the trace contains `RETRIEVE_KNOWLEDGE`; the answer says `10`; and the
+   runtime appends `employee-handbook.pdf - page 1` under `Sources`.
 
-7. Check memory:
+4. Open `RAG Debug`. Verify it shows the retrieval query, chunk ID, source filename,
+   page number, similarity score, and retrieval latency.
 
-   Open `Inspect memory` in the sidebar. You should see both the user goal and the final assistant answer stored.
+5. Ask an unsupported document question:
 
-8. Check persistence:
-
-   Restart Streamlit and verify the previous conversation reloads from local memory.
-
-9. Check local tests:
-
-   ```powershell
-   python test_memory.py
-   python test_agent.py
-   python test_tools.py
+   ```text
+   According to the handbook, where can employees park their cars?
    ```
+
+   Expected: no chunk should pass the configured similarity threshold, or the agent
+   should state that the available documents do not provide enough evidence.
+
+6. Upload `documents/sample/internal-api-guide.pdf`, then ask:
+
+   ```text
+   According to the uploaded API guide, what authentication method is required?
+   ```
+
+   Expected: `OAuth 2.0 bearer-token authentication`, cited to the API guide.
+
+7. Upload `documents/sample/product-manual.pdf`, enable `calculator.evaluate`, and ask:
+
+   ```text
+   According to the product manual, what is the operating temperature range,
+   and convert the maximum Celsius temperature to Fahrenheit?
+   ```
+
+   Expected trace:
+
+   ```text
+   RETRIEVE_KNOWLEDGE -> TOOL_CALL calculator.evaluate -> FINISH
+   ```
+
+   Expected answer: `5 to 40 C`, `104 F`, plus the product manual source.
+
+8. Ask `Explain recursion.` Expected: the agent can answer without retrieval.
+
+9. Test lifecycle controls. Use `Re-index`, inspect the unchanged document metadata,
+   then use `Delete`. Verify the document count, chunks, embeddings, and original file
+   are removed together.
+
+10. Run all local tests:
+
+    ```powershell
+    python test_memory.py
+    python test_agent.py
+    python test_tools.py
+    python test_rag.py
+    ```
+
+## Debugging RAG
+
+If an answer is wrong, inspect the layers in order:
+
+```text
+PDF parsing -> chunks -> embeddings -> retrieved results -> context -> final answer
+```
+
+- Retrieval failure: the correct fact exists in a PDF, but its chunk is absent from
+  `RAG Debug`. Investigate parsing, chunk boundaries, query wording, scores, `top_k`,
+  and the minimum similarity threshold.
+- Generation failure: the correct chunk appears in `RAG Debug`, but the answer is
+  wrong. Investigate grounding instructions, conflicting evidence, and model behavior.
+
+Do not change the LLM prompt first when the retriever never found the evidence.
+
+For the deeper architecture, trade-offs, and security model, read
+[`docs/STAGE5_RAG.md`](docs/STAGE5_RAG.md).

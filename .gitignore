@@ -2,5 +2,10 @@
 __pycache__/
 *.pyc
 .venv/
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 memory/history.json
+documents/raw/*
+!documents/raw/.gitkeep
+vector_store/*
+!vector_store/.gitkeep

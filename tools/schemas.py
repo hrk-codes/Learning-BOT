@@ -7,7 +7,7 @@ class SchemaValidationError(Exception):
 
 def validate_object_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     if schema.get("type") != "object":
-        raise SchemaValidationError("Only object schemas are supported in Stage 4.")
+        raise SchemaValidationError("Only object schemas are supported in this learning runtime.")
     if not isinstance(arguments, dict):
         raise SchemaValidationError("arguments must be a JSON object.")
 

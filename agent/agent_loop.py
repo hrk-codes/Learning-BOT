@@ -1,12 +1,16 @@
 import logging
 import json
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from agent.action_router import route_action
 from agent.agent_state import AgentState, AgentTraceStep
 from agent.decision_schema import DecisionParseError, parse_agent_decision
 from prompts.agent_prompt import AGENT_SYSTEM_PROMPT
 from tools.manager import ToolManager
+
+if TYPE_CHECKING:
+    from rag.pipeline import RagPipeline
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +28,9 @@ def run_agent_loop(
     max_iterations: int,
     llm_decision_fn: LLMDecisionFn,
     tool_manager: ToolManager,
+    rag_pipeline: "RagPipeline | None" = None,
+    rag_top_k: int = 4,
+    rag_min_score: float = 0.25,
 ) -> AgentState:
     state = AgentState(goal=goal, max_iterations=max_iterations)
     logger.info("AGENT START goal=%s max_iterations=%s", goal, max_iterations)
@@ -49,8 +56,16 @@ def run_agent_loop(
                 observation=observation,
                 llm_decision_fn=llm_decision_fn,
                 tool_manager=tool_manager,
+                rag_pipeline=rag_pipeline,
             )
-            route_action(state, decision, tool_manager)
+            route_action(
+                state,
+                decision,
+                tool_manager,
+                rag_pipeline=rag_pipeline,
+                rag_top_k=rag_top_k,
+                rag_min_score=rag_min_score,
+            )
         except (DecisionParseError, AgentRuntimeError) as exc:
             state.status = "error"
             state.final_answer = f"The agent stopped safely because its decision step failed: {exc}"
@@ -66,6 +81,7 @@ def run_agent_loop(
             logger.error("AGENT ERROR %s", exc)
             break
 
+    _append_retrieved_sources(state)
     logger.info("AGENT END status=%s iterations=%s", state.status, state.iteration_count)
     return state
 
@@ -82,8 +98,15 @@ def decide(
     observation: str,
     llm_decision_fn: LLMDecisionFn,
     tool_manager: ToolManager,
+    rag_pipeline: "RagPipeline | None",
 ):
-    context = build_agent_context(state, conversation_context, observation, tool_manager)
+    context = build_agent_context(
+        state,
+        conversation_context,
+        observation,
+        tool_manager,
+        rag_pipeline,
+    )
     state.llm_call_count += 1
     raw_decision = llm_decision_fn(context)
     return parse_agent_decision(raw_decision)
@@ -94,6 +117,7 @@ def build_agent_context(
     conversation_context: list[dict[str, str]],
     observation: str,
     tool_manager: ToolManager,
+    rag_pipeline: "RagPipeline | None" = None,
 ) -> list[dict[str, str]]:
     visible_trace = [
         {
@@ -103,13 +127,14 @@ def build_agent_context(
             "content": step.content,
             "tool_name": step.tool_name,
             "tool_result": step.tool_result,
+            "retrieval_query": step.retrieval_query,
+            "retrieved_chunks": step.retrieved_chunks,
         }
         for step in state.trace
     ]
 
-    # The LLM receives selected state, not the entire Python object. This keeps
-    # context construction explicit and prepares the same place where Stage 4
-    # will later add tool results.
+    # The LLM receives selected state, not the entire Python object. Keeping
+    # context construction explicit lets tools, memory, and RAG remain separate inputs.
     agent_state_summary = {
         "goal": state.goal,
         "iteration_count": state.iteration_count,
@@ -117,6 +142,11 @@ def build_agent_context(
         "current_observation": observation,
         "previous_steps": visible_trace,
         "active_tools": tool_manager.get_active_tool_descriptions(),
+        "knowledge_base": (
+            rag_pipeline.describe_for_agent()
+            if rag_pipeline is not None
+            else {"available": False, "documents": []}
+        ),
     }
 
     return [
@@ -129,6 +159,8 @@ def build_agent_context(
                 "Return only JSON.\n\n"
                 "If a tool is needed, use action=TOOL_CALL with tool_name and tool_arguments. "
                 "Only request tools listed in active_tools.\n\n"
+                "If indexed document evidence is needed, use action=RETRIEVE_KNOWLEDGE "
+                "with a focused retrieval_query. Do not use tool fields for retrieval.\n\n"
                 f"Agent state:\n{json.dumps(agent_state_summary, indent=2)}"
             ),
         },
@@ -144,3 +176,13 @@ def _build_max_iteration_answer(state: AgentState) -> str:
             f"{partial}"
         )
     return "The agent reached its maximum iteration limit before producing a final answer."
+
+
+def _append_retrieved_sources(state: AgentState) -> None:
+    if not state.final_answer or not state.retrieved_chunks:
+        return
+    from rag.context.context_builder import format_source_references
+
+    sources = format_source_references(state.retrieved_chunks)
+    if sources and "\nSources:\n" not in state.final_answer:
+        state.final_answer = f"{state.final_answer.rstrip()}\n\nSources:\n{sources}"

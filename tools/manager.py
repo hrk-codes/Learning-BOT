@@ -31,7 +31,7 @@ class ToolManager:
     def _check_permission(self, permission: Permission) -> str | None:
         if permission in {"safe", "read_only_external"}:
             return None
-        # Stage 4 introduces permissions but does not yet implement approval
+        # The runtime models permissions but does not yet implement approval
         # workflows. Side-effecting tools remain blocked until a later stage can
         # ask the user for explicit confirmation.
-        return f"Permission {permission!r} requires user confirmation, which is not enabled in Stage 4."
+        return f"Permission {permission!r} requires user confirmation, which is not enabled yet."
