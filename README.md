@@ -1,228 +1,155 @@
-# Stage 4 Tool Agent
+# Stage 6 Long-Term Memory Agent
 
-Small Streamlit assistant that sends chat messages to Groq with raw HTTP/JSON, conversation memory, an agent runtime, and a controlled tool-calling architecture.
+A Streamlit AI agent built from first principles with Groq, recent conversation history,
+controlled tools, local RAG, and scoped long-term user/project memory.
 
-## Where It Fits
-
-User -> Chat UI -> Memory Layer -> Agent State -> Agent Runtime -> LLM Decision -> Internal Action or Tool Call -> Tool Registry -> Tool Result -> State Update -> Finish -> Memory Update -> UI
-
-## File Responsibilities
-
-- `app.py`: Streamlit UI, message flow, memory controls, and response display.
-- `config.py`: API keys, model defaults, timeout, history path, and recent-message limit.
-- `agent/agent.py`: Connects the app and config to the agent runtime.
-- `agent/agent_loop.py`: Observe, decide, act, update state, and terminate.
-- `agent/agent_state.py`: Current goal, iteration count, status, observations, action results, and trace.
-- `agent/decision_schema.py`: Structured JSON contract between the LLM and runtime, including `TOOL_CALL`.
-- `agent/action_router.py`: Routes decisions to internal actions, tool execution, or finish handling.
-- `llm/groq_client.py`: Raw HTTP/JSON request to Groq and streaming response parsing.
-- `memory/chat_memory.py`: Load, validate, save, clear, and select conversation memory.
-- `memory/history.json`: Inspectable persistent conversation history.
-- `prompts/agent_prompt.py`: Agent decision instructions and allowed actions.
-- `prompts/system_prompt.py`: Stage 2 chat prompt kept for comparison.
-- `tools/base.py`: Common tool contract and result format.
-- `tools/registry.py`: Runtime catalog of known tools.
-- `tools/manager.py`: Active toolbox and permission boundary.
-- `tools/calculator`, `tools/weather`, `tools/search`: Trusted local tool implementations.
-
-## Memory Model
-
-Memory is stored information. Context is the selected information sent to the LLM for the current request.
-
-This project uses two memory positions:
-
-- Session memory: `st.session_state`, which keeps the current UI conversation alive while Streamlit is running.
-- Persistent memory: `memory/history.json`, which keeps the conversation available after restarting the app.
-
-The context builder does not send the entire history. It sends:
+## Architecture
 
 ```text
-system prompt
-+
-latest N user/assistant messages
+User
+  -> Streamlit UI
+  -> recent conversation history (Stage 2 JSON)
+  -> long-term memory service (Stage 6 SQLite)
+  -> agent loop
+       -> answer
+       -> retrieve document knowledge (Stage 5 RAG)
+       -> call a permitted tool (Stage 4)
+  -> Groq LLM
 ```
 
-This recent-message window is simple and transparent. It can lose older details in long conversations, but it teaches the core context-window problem before adding summarization or semantic retrieval.
-
-Storage capacity is not the same as context-window capacity:
+The boundaries matter:
 
 ```text
-history.json = library
-selected recent messages = desk
-LLM = person reading what is on the desk
+Conversation -> recent messages from this chat
+Memory       -> durable, scoped user/project facts
+RAG          -> evidence from indexed reference documents
+Tools        -> permissioned actions and fresh observations
+Agent state  -> one request's goal, trace, and counters
 ```
 
-## Agent And Tool Model
+## Memory Pipelines
 
-Memory answers: what should be retained?
-
-Agent state answers: what is happening during this current execution?
-
-The Stage 3 loop is:
+Write:
 
 ```text
-observe
-decide with LLM
-parse structured JSON decision
-execute internal action
-update state
-repeat or finish
+Explicit user statement -> typed candidate -> validation/policy
+-> deduplication -> conflict resolution -> SQLite -> audit event
 ```
 
-The loop is not the intelligence. The loop is the orchestration mechanism. The LLM decides the next action, and Python enforces the allowed actions, parse rules, state updates, and termination limits.
-
-Allowed Stage 4 actions:
-
-- `ANALYZE`
-- `PLAN`
-- `CONTINUE`
-- `TOOL_CALL`
-- `FINISH`
-
-A tool is a controlled capability exposed through a contract. The LLM chooses what capability it wants, but the runtime decides whether the tool is active, whether arguments match the schema, whether permissions allow it, and how execution happens.
-
-Tool calling flow:
+Read:
 
 ```text
-LLM decision
--> TOOL_CALL request
--> tool manager checks active tools
--> tool validates JSON arguments
--> permission check
--> executor runs the tool
--> structured tool result becomes an observation
--> LLM decides whether to continue or finish
+Current request -> user/project SQL filter -> lexical relevance
+-> confidence + importance + recency + scope ranking
+-> context budget -> separate untrusted memory section -> agent
 ```
 
-Important distinction:
+The V1 extractor is deliberately conservative and rule-based. It stores explicit forms
+such as `My name is...`, `I prefer...`, `My long-term goal is...`, project statements,
+and `Remember that...`. Ordinary greetings do not become durable memories. LLM-based
+extraction and semantic vector memory remain isolated future upgrades behind the same
+typed candidate and ranked-retrieval interfaces.
+
+## Project Structure
 
 ```text
-Tool result != final answer
+app.py                         Streamlit chat, Memory Center, RAG UI, debug views
+config.py                      Environment and runtime configuration
+agent/                         Bounded decisions, state, routing, and orchestration
+memory/chat_memory.py          Stage 2 recent conversation JSON
+memory/models.py               Typed Stage 6 memory contracts
+memory/repository.py           SQLite schema, scoped queries, transactions, audit
+memory/policy.py               Validation, source authority, secret protection
+memory/extractor.py            Conservative explicit-fact extraction
+memory/ranker.py               Deterministic query-dependent ranking
+memory/context_builder.py      Budgeted model-facing memory context
+memory/service.py              Remember, search, update, forget, inspect, clear
+rag/                           Stage 5 document ingestion and retrieval
+tools/                         Stage 4 registry, permissions, and tools
+docs/STAGE5_RAG.md             RAG architecture and testing
+docs/STAGE6_MEMORY.md          Memory architecture, tradeoffs, security, evolution
 ```
 
-The agent must observe the tool result and then decide what to tell the user.
+SQLite is part of Python's standard library, so Stage 6 adds no dependency. Generated
+database files and WAL files are ignored by Git.
 
 ## Setup
 
-1. Create a virtual environment.
-
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
-
-2. Install dependencies.
-
-   ```powershell
-   pip install -r requirements.txt
-   ```
-
-3. Create `.env` from `.env.example` and add your key.
-
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-
-   Then edit `.env`:
-
-   ```text
-   GROQ_API_KEY=your-real-key
-   ```
-
-4. Run the app.
-
-   ```powershell
-   streamlit run app.py
-   ```
-
-## What This Teaches
-
-- API keys stay outside source code.
-- HTTP requests use headers and JSON bodies.
-- Chat models receive messages with roles.
-- User and assistant messages must both be stored for continuity.
-- Persistent storage can be simple JSON before it needs a database.
-- Context construction selects useful memory for the current request.
-- Context should be limited instead of blindly sending all history.
-- Agent goals live in `AgentState`.
-- Agent decisions are structured JSON, not arbitrary text parsing.
-- Maximum iterations prevent accidental infinite loops.
-- Tool contracts describe name, description, input schema, output schema, permission, timeout, and version.
-- JSON Schema protects the runtime from invalid model-generated arguments.
-- Dashboard-enabled tools form the active tool set sent to the LLM.
-- Temperature changes response variety.
-- Max tokens limits response length.
-- Streaming sends the response piece by piece.
-- Errors should be handled clearly.
-- Logs should explain failures without exposing secrets.
-
-## Local Checks
-
 ```powershell
-python -m compileall .
-python test_memory.py
-python test_agent.py
-python test_tools.py
+cd "C:\Users\hrkgh\Agent learn\BOT 1"
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-## How To Check Stage 4
+Put one fresh Groq key in `.env`:
 
-1. Run the app:
+```text
+GROQ_API_KEY=your-fresh-key
+```
 
-   ```powershell
-   streamlit run app.py
-   ```
+Start the app:
 
-2. Try a no-tool goal:
+```powershell
+streamlit run app.py
+```
 
-   ```text
-   Explain recursion.
-   ```
+Open `http://localhost:8501`.
 
-   Expected: the agent should normally answer without a tool call.
+## How To Check Stage 6
 
-3. Try calculator:
+1. Confirm the page title is `Stage 6 Long-Term Memory Agent` and the sidebar has a
+   `Memory Center` with an ON/OFF toggle, manual form, active records, deletion controls,
+   and an audit trail.
 
-   ```text
-   What is 12345 * 678?
-   ```
+2. Ask `Hello.` Open `Active memories`. Expected: no new long-term record.
 
-   Expected: open `Agent Execution` and look for `TOOL_CALL` with `calculator.evaluate`, followed by a final answer.
+3. Ask `Remember that my favorite programming language is Python.` Expected: a stored
+   confirmation. Open `Active memories` and verify a profile/user record with high
+   confidence and importance.
 
-4. Try weather:
+4. Ask `What do you remember about me?` Expected: only real active SQLite records are
+   listed. This command works without Groq because it reads the memory service directly.
 
-   ```text
-   What's the current weather in Delhi?
-   ```
+5. Stop Streamlit, start it again, and repeat step 4. Expected: the Python memory remains,
+   proving persistence is independent from the current process/session.
 
-   Expected: `TOOL_CALL` with `weather.get_current`, then a final answer based on the tool result.
+6. With a valid Groq key, ask `What programming language should I use for my AI project?`
+   Open `Memory Debug`. Expected: the Python record has a retrieval score and is marked
+   `injected`; the agent can use it in the answer.
 
-5. Try disabled tool behavior:
+7. Ask `Explain database normalization.` Expected: the programming preference is not
+   injected because scope/importance cannot make a lexically unrelated record relevant.
 
-   Disable `weather.get_current` in the sidebar toolbox, then ask for weather again.
+8. Ask `I use Python for my backend.` Then ask `I'm moving my backend projects to Go.`
+   Expected: one active Go record, the Python record marked `superseded` in SQLite, and
+   a supersession event in the audit trail.
 
-   Expected: the agent should not execute weather. The trace should show the tool is disabled or the answer should explain the capability is unavailable.
+9. Ask `Forget that I prefer Python.` Expected: matching content is deleted from SQLite;
+   `What do you remember about me?` no longer lists it; the audit trail retains deletion
+   metadata but not the deleted text.
 
-6. Try multi-tool behavior:
+10. Turn long-term memory OFF. Ask a personalized question and then state a new preference.
+    Expected: no long-term records are retrieved or written. Recent chat history still
+    works and the Memory Center can still inspect/delete user-owned data.
 
-   ```text
-   Find current weather for Delhi and calculate the Fahrenheit equivalent.
-   ```
+11. Add a project-scoped fact in the manual form. Verify its record shows `project` scope.
+    Use `Clear project memories`; user-profile records should remain.
 
-   Expected: the agent can call weather, then calculator, then finish.
+12. For RAG plus memory, index a sample PDF and ask for document advice tailored to your
+    stored preference. Expected: `long_term_memory` and `knowledge_base` remain separate
+    in behavior, with memory scores in `Memory Debug` and document chunks in `RAG Debug`.
 
-7. Check memory:
+13. For tool plus memory, enable `calculator.evaluate` and ask for a calculation formatted
+    according to a stored explanation preference. Expected: memory informs the decision;
+    the tool performs the arithmetic; neither impersonates the other.
 
-   Open `Inspect memory` in the sidebar. You should see both the user goal and the final assistant answer stored.
+Run the complete automated evaluation:
 
-8. Check persistence:
+```powershell
+python -m pytest -q
+```
 
-   Restart Streamlit and verify the previous conversation reloads from local memory.
-
-9. Check local tests:
-
-   ```powershell
-   python test_memory.py
-   python test_agent.py
-   python test_tools.py
-   ```
+For the deeper model, ranking formula, alternatives, privacy boundary, and production
+evolution, read [`docs/STAGE6_MEMORY.md`](docs/STAGE6_MEMORY.md).

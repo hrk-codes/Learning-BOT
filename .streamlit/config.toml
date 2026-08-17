@@ -1,0 +1,5 @@
+[server]
+# Transformers exposes many lazy optional modules. Streamlit's file watcher
+# imports them while scanning paths, which creates noisy torchvision errors even
+# though this text-only app works. Disable code watching and restart after edits.
+fileWatcherType = "none"

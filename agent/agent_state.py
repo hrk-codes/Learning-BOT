@@ -16,6 +16,9 @@ class AgentTraceStep:
     tool_name: str | None = None
     tool_arguments: dict[str, Any] | None = None
     tool_result: dict[str, Any] | None = None
+    retrieval_query: str | None = None
+    retrieved_chunks: list[dict[str, Any]] | None = None
+    retrieval_latency_seconds: float = 0.0
     elapsed_seconds: float = 0.0
 
 
@@ -32,6 +35,17 @@ class AgentState:
     llm_call_count: int = 0
     tool_call_count: int = 0
     total_tool_latency_seconds: float = 0.0
+    rag_retrieval_count: int = 0
+    total_rag_latency_seconds: float = 0.0
+    retrieved_chunks: list[dict[str, Any]] = field(default_factory=list)
+    memory_candidate_count: int = 0
+    memory_retrieved_count: int = 0
+    memory_injected_count: int = 0
+    memory_retrieval_seconds: float = 0.0
+    memory_ranking_seconds: float = 0.0
+    memory_context_characters: int = 0
+    memory_context_tokens: int = 0
+    retrieved_memories: list[dict[str, Any]] = field(default_factory=list)
 
     def record_observation(self, observation: str) -> None:
         self.observations.append(observation)

@@ -3,8 +3,22 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-AllowedAction = Literal["ANALYZE", "PLAN", "CONTINUE", "TOOL_CALL", "FINISH"]
-ALLOWED_ACTIONS = {"ANALYZE", "PLAN", "CONTINUE", "TOOL_CALL", "FINISH"}
+AllowedAction = Literal[
+    "ANALYZE",
+    "PLAN",
+    "CONTINUE",
+    "RETRIEVE_KNOWLEDGE",
+    "TOOL_CALL",
+    "FINISH",
+]
+ALLOWED_ACTIONS = {
+    "ANALYZE",
+    "PLAN",
+    "CONTINUE",
+    "RETRIEVE_KNOWLEDGE",
+    "TOOL_CALL",
+    "FINISH",
+}
 
 
 class DecisionParseError(Exception):
@@ -19,6 +33,7 @@ class AgentDecision:
     status: str
     tool_name: str | None = None
     tool_arguments: dict[str, Any] | None = None
+    retrieval_query: str | None = None
 
 
 def parse_agent_decision(raw_text: str) -> AgentDecision:
@@ -31,11 +46,17 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
     status = data.get("status", "")
     tool_name = data.get("tool_name")
     tool_arguments = data.get("tool_arguments")
+    retrieval_query = data.get("retrieval_query")
 
     if action not in ALLOWED_ACTIONS:
         raise DecisionParseError(f"Unknown action: {action!r}")
-    if not isinstance(content, str) or not content.strip():
-        raise DecisionParseError("Decision content must be a non-empty string.")
+    if not isinstance(content, str):
+        raise DecisionParseError("Decision content must be a string.")
+    if not content.strip():
+        if action in {"RETRIEVE_KNOWLEDGE", "TOOL_CALL"}:
+            content = str(status).strip() or f"Executing {action.lower().replace('_', ' ')}."
+        else:
+            raise DecisionParseError("Decision content must be a non-empty string.")
     if not isinstance(finished, bool):
         raise DecisionParseError("Decision finished must be true or false.")
     if action == "TOOL_CALL":
@@ -45,6 +66,16 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
             raise DecisionParseError("TOOL_CALL decisions must include tool_arguments as an object.")
     elif tool_name is not None or tool_arguments is not None:
         raise DecisionParseError("Only TOOL_CALL decisions may include tool_name or tool_arguments.")
+
+    if action == "RETRIEVE_KNOWLEDGE":
+        if not isinstance(retrieval_query, str) or not retrieval_query.strip():
+            raise DecisionParseError(
+                "RETRIEVE_KNOWLEDGE decisions must include a non-empty retrieval_query."
+            )
+    elif retrieval_query is not None:
+        raise DecisionParseError(
+            "Only RETRIEVE_KNOWLEDGE decisions may include retrieval_query."
+        )
 
     if action == "FINISH" and not finished:
         raise DecisionParseError("FINISH decisions must set finished=true.")
@@ -58,6 +89,7 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
         status=str(status).strip() or "decision accepted",
         tool_name=tool_name.strip() if isinstance(tool_name, str) else None,
         tool_arguments=tool_arguments,
+        retrieval_query=retrieval_query.strip() if isinstance(retrieval_query, str) else None,
     )
 
 
@@ -65,7 +97,7 @@ def _parse_json_object(raw_text: str) -> dict:
     """Parse a JSON object, allowing a model to wrap it in explanatory text.
 
     Production systems usually use native structured outputs or tool calls.
-    Stage 3 keeps raw JSON visible so the decision contract is easy to inspect.
+    This learning project keeps raw JSON visible so the decision contract is easy to inspect.
     """
     text = raw_text.strip()
     try:
