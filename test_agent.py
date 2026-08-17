@@ -105,6 +105,27 @@ def test_decision_schema_rejects_invalid_action() -> None:
         raise AssertionError("Expected DecisionParseError")
 
 
+def test_retrieval_decision_accepts_empty_display_content() -> None:
+    decision = parse_agent_decision(
+        '{"action":"RETRIEVE_KNOWLEDGE","status":"retrieving evidence",'
+        '"content":"","retrieval_query":"Atlas Sensor operating temperature",'
+        '"tool_name":null,"tool_arguments":null,"finished":false}'
+    )
+
+    assert decision.content == "retrieving evidence"
+
+
+def test_finish_decision_still_requires_content() -> None:
+    try:
+        parse_agent_decision(
+            '{"action":"FINISH","status":"done","content":"","finished":true}'
+        )
+    except DecisionParseError as exc:
+        assert "non-empty string" in str(exc)
+    else:
+        raise AssertionError("Expected DecisionParseError")
+
+
 def test_calculator_tool_call_becomes_observation_then_finish() -> None:
     decisions = iter(
         [
@@ -250,6 +271,8 @@ if __name__ == "__main__":
     test_max_iterations_stops_unfinished_agent()
     test_malformed_decision_stops_safely()
     test_decision_schema_rejects_invalid_action()
+    test_retrieval_decision_accepts_empty_display_content()
+    test_finish_decision_still_requires_content()
     test_calculator_tool_call_becomes_observation_then_finish()
     test_disabled_tool_returns_error_observation()
     test_invalid_tool_arguments_are_blocked()

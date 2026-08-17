@@ -38,6 +38,14 @@ class AgentState:
     rag_retrieval_count: int = 0
     total_rag_latency_seconds: float = 0.0
     retrieved_chunks: list[dict[str, Any]] = field(default_factory=list)
+    memory_candidate_count: int = 0
+    memory_retrieved_count: int = 0
+    memory_injected_count: int = 0
+    memory_retrieval_seconds: float = 0.0
+    memory_ranking_seconds: float = 0.0
+    memory_context_characters: int = 0
+    memory_context_tokens: int = 0
+    retrieved_memories: list[dict[str, Any]] = field(default_factory=list)
 
     def record_observation(self, observation: str) -> None:
         self.observations.append(observation)

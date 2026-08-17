@@ -1,80 +1,77 @@
-# Stage 5 RAG Agent
+# Stage 6 Long-Term Memory Agent
 
-A small Streamlit AI agent built from first principles with Groq, conversation memory,
-a controlled tool runtime, and a local retrieval-augmented knowledge layer.
+A Streamlit AI agent built from first principles with Groq, recent conversation history,
+controlled tools, local RAG, and scoped long-term user/project memory.
 
-Stage 5 does not create a separate PDF chatbot. It adds knowledge retrieval as one
-decision available to the existing agent:
-
-```text
-User goal
-  -> Agent decision
-     -> answer directly
-     -> RETRIEVE_KNOWLEDGE
-     -> TOOL_CALL
-     -> continue
-     -> finish
-```
-
-## Core Distinctions
+## Architecture
 
 ```text
-Memory -> information from the conversation
-RAG    -> evidence from indexed reference documents
-Tools  -> capabilities that perform actions
-LLM    -> language generation and structured decisions
+User
+  -> Streamlit UI
+  -> recent conversation history (Stage 2 JSON)
+  -> long-term memory service (Stage 6 SQLite)
+  -> agent loop
+       -> answer
+       -> retrieve document knowledge (Stage 5 RAG)
+       -> call a permitted tool (Stage 4)
+  -> Groq LLM
 ```
 
-RAG does not train or fine-tune the LLM. It retrieves relevant text and deliberately
-places that evidence into the model context for one answer.
-
-## Two Pipelines
-
-Ingestion happens when a PDF is added:
+The boundaries matter:
 
 ```text
-PDF -> validate -> save original -> parse pages -> chunk -> metadata
-    -> embed once -> store vectors
+Conversation -> recent messages from this chat
+Memory       -> durable, scoped user/project facts
+RAG          -> evidence from indexed reference documents
+Tools        -> permissioned actions and fresh observations
+Agent state  -> one request's goal, trace, and counters
 ```
 
-Retrieval happens when the agent requests document knowledge:
+## Memory Pipelines
+
+Write:
 
 ```text
-Question -> normalize -> embed query -> cosine search -> top-k chunks
-         -> grounded observation -> agent -> answer + sources
+Explicit user statement -> typed candidate -> validation/policy
+-> deduplication -> conflict resolution -> SQLite -> audit event
 ```
 
-Document embeddings are not recomputed for every question. Query time creates one
-query vector and compares it with the stored chunk vectors.
+Read:
+
+```text
+Current request -> user/project SQL filter -> lexical relevance
+-> confidence + importance + recency + scope ranking
+-> context budget -> separate untrusted memory section -> agent
+```
+
+The V1 extractor is deliberately conservative and rule-based. It stores explicit forms
+such as `My name is...`, `I prefer...`, `My long-term goal is...`, project statements,
+and `Remember that...`. Ordinary greetings do not become durable memories. LLM-based
+extraction and semantic vector memory remain isolated future upgrades behind the same
+typed candidate and ranked-retrieval interfaces.
 
 ## Project Structure
 
 ```text
-app.py                         Streamlit chat, knowledge UI, and debug views
-agent/                         State, decisions, routing, and bounded agent loop
-memory/                        Conversation memory
-tools/                         Calculator, weather, search, registry, and permissions
-rag/ingestion/                 PDF validation, parsing, cleaning, and chunking
-rag/embeddings/embedder.py     Local text-to-vector boundary
-rag/storage/vector_store.py    Inspectable JSON vectors and cosine search
-rag/retrieval/retriever.py     Query processing and ranked structured results
-rag/context/context_builder.py Grounded evidence and source construction
-rag/pipeline.py                RAG orchestration and document lifecycle
-documents/raw/                 Uploaded source-of-truth PDFs, ignored by Git
-documents/sample/              Controlled PDFs for testing
-vector_store/                  Generated retrieval index, ignored by Git
+app.py                         Streamlit chat, Memory Center, RAG UI, debug views
+config.py                      Environment and runtime configuration
+agent/                         Bounded decisions, state, routing, and orchestration
+memory/chat_memory.py          Stage 2 recent conversation JSON
+memory/models.py               Typed Stage 6 memory contracts
+memory/repository.py           SQLite schema, scoped queries, transactions, audit
+memory/policy.py               Validation, source authority, secret protection
+memory/extractor.py            Conservative explicit-fact extraction
+memory/ranker.py               Deterministic query-dependent ranking
+memory/context_builder.py      Budgeted model-facing memory context
+memory/service.py              Remember, search, update, forget, inspect, clear
+rag/                           Stage 5 document ingestion and retrieval
+tools/                         Stage 4 registry, permissions, and tools
+docs/STAGE5_RAG.md             RAG architecture and testing
+docs/STAGE6_MEMORY.md          Memory architecture, tradeoffs, security, evolution
 ```
 
-The implementation uses:
-
-- `pypdf` for text-based PDF extraction. Scanned PDFs need future OCR support.
-- `sentence-transformers/all-MiniLM-L6-v2` for local 384-dimensional embeddings.
-- A JSON vector store with explicit cosine similarity for a small learning corpus.
-- Deterministic 1,200-character chunks with 200-character overlap by default.
-
-The JSON index is intentionally simple and inspectable. FAISS, Chroma, Qdrant,
-Weaviate, Pinecone, or pgvector become preferable when corpus size, filtering,
-concurrency, durability, or distributed deployment outgrow a local learning system.
+SQLite is part of Python's standard library, so Stage 6 adds no dependency. Generated
+database files and WAL files are ignored by Git.
 
 ## Setup
 
@@ -86,10 +83,10 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Put the Groq key in `.env`:
+Put one fresh Groq key in `.env`:
 
 ```text
-GROQ_API_KEY=your-real-key
+GROQ_API_KEY=your-fresh-key
 ```
 
 Start the app:
@@ -98,96 +95,61 @@ Start the app:
 streamlit run app.py
 ```
 
-The first PDF indexing run downloads the local embedding model. Later runs reuse the
-cached model and stored document vectors.
+Open `http://localhost:8501`.
 
-The project disables Streamlit's automatic source watcher because it probes optional
-Transformers vision modules and produces misleading `torchvision` errors in a text-only
-app. Restart Streamlit manually after changing Python files.
+## How To Check Stage 6
 
-## How To Check Stage 5
+1. Confirm the page title is `Stage 6 Long-Term Memory Agent` and the sidebar has a
+   `Memory Center` with an ON/OFF toggle, manual form, active records, deletion controls,
+   and an audit trail.
 
-1. Open `http://localhost:8501` and confirm the title is `Stage 5 RAG Agent`.
+2. Ask `Hello.` Open `Active memories`. Expected: no new long-term record.
 
-2. In `Knowledge Base`, upload `documents/sample/employee-handbook.pdf` and click
-   `Index PDF`. Verify the status passes through upload, parsing, chunking, embedding,
-   indexing, and completion. The document should show `indexed`, one page, at least one
-   chunk, an embedding count, content hash, version, and page metadata.
+3. Ask `Remember that my favorite programming language is Python.` Expected: a stored
+   confirmation. Open `Active memories` and verify a profile/user record with high
+   confidence and importance.
 
-3. Ask:
+4. Ask `What do you remember about me?` Expected: only real active SQLite records are
+   listed. This command works without Groq because it reads the memory service directly.
 
-   ```text
-   According to the employee handbook, how many unused leave days can I take into next year?
-   ```
+5. Stop Streamlit, start it again, and repeat step 4. Expected: the Python memory remains,
+   proving persistence is independent from the current process/session.
 
-   Expected: the trace contains `RETRIEVE_KNOWLEDGE`; the answer says `10`; and the
-   runtime appends `employee-handbook.pdf - page 1` under `Sources`.
+6. With a valid Groq key, ask `What programming language should I use for my AI project?`
+   Open `Memory Debug`. Expected: the Python record has a retrieval score and is marked
+   `injected`; the agent can use it in the answer.
 
-4. Open `RAG Debug`. Verify it shows the retrieval query, chunk ID, source filename,
-   page number, similarity score, and retrieval latency.
+7. Ask `Explain database normalization.` Expected: the programming preference is not
+   injected because scope/importance cannot make a lexically unrelated record relevant.
 
-5. Ask an unsupported document question:
+8. Ask `I use Python for my backend.` Then ask `I'm moving my backend projects to Go.`
+   Expected: one active Go record, the Python record marked `superseded` in SQLite, and
+   a supersession event in the audit trail.
 
-   ```text
-   According to the handbook, where can employees park their cars?
-   ```
+9. Ask `Forget that I prefer Python.` Expected: matching content is deleted from SQLite;
+   `What do you remember about me?` no longer lists it; the audit trail retains deletion
+   metadata but not the deleted text.
 
-   Expected: no chunk should pass the configured similarity threshold, or the agent
-   should state that the available documents do not provide enough evidence.
+10. Turn long-term memory OFF. Ask a personalized question and then state a new preference.
+    Expected: no long-term records are retrieved or written. Recent chat history still
+    works and the Memory Center can still inspect/delete user-owned data.
 
-6. Upload `documents/sample/internal-api-guide.pdf`, then ask:
+11. Add a project-scoped fact in the manual form. Verify its record shows `project` scope.
+    Use `Clear project memories`; user-profile records should remain.
 
-   ```text
-   According to the uploaded API guide, what authentication method is required?
-   ```
+12. For RAG plus memory, index a sample PDF and ask for document advice tailored to your
+    stored preference. Expected: `long_term_memory` and `knowledge_base` remain separate
+    in behavior, with memory scores in `Memory Debug` and document chunks in `RAG Debug`.
 
-   Expected: `OAuth 2.0 bearer-token authentication`, cited to the API guide.
+13. For tool plus memory, enable `calculator.evaluate` and ask for a calculation formatted
+    according to a stored explanation preference. Expected: memory informs the decision;
+    the tool performs the arithmetic; neither impersonates the other.
 
-7. Upload `documents/sample/product-manual.pdf`, enable `calculator.evaluate`, and ask:
+Run the complete automated evaluation:
 
-   ```text
-   According to the product manual, what is the operating temperature range,
-   and convert the maximum Celsius temperature to Fahrenheit?
-   ```
-
-   Expected trace:
-
-   ```text
-   RETRIEVE_KNOWLEDGE -> TOOL_CALL calculator.evaluate -> FINISH
-   ```
-
-   Expected answer: `5 to 40 C`, `104 F`, plus the product manual source.
-
-8. Ask `Explain recursion.` Expected: the agent can answer without retrieval.
-
-9. Test lifecycle controls. Use `Re-index`, inspect the unchanged document metadata,
-   then use `Delete`. Verify the document count, chunks, embeddings, and original file
-   are removed together.
-
-10. Run all local tests:
-
-    ```powershell
-    python test_memory.py
-    python test_agent.py
-    python test_tools.py
-    python test_rag.py
-    ```
-
-## Debugging RAG
-
-If an answer is wrong, inspect the layers in order:
-
-```text
-PDF parsing -> chunks -> embeddings -> retrieved results -> context -> final answer
+```powershell
+python -m pytest -q
 ```
 
-- Retrieval failure: the correct fact exists in a PDF, but its chunk is absent from
-  `RAG Debug`. Investigate parsing, chunk boundaries, query wording, scores, `top_k`,
-  and the minimum similarity threshold.
-- Generation failure: the correct chunk appears in `RAG Debug`, but the answer is
-  wrong. Investigate grounding instructions, conflicting evidence, and model behavior.
-
-Do not change the LLM prompt first when the retriever never found the evidence.
-
-For the deeper architecture, trade-offs, and security model, read
-[`docs/STAGE5_RAG.md`](docs/STAGE5_RAG.md).
+For the deeper model, ranking formula, alternatives, privacy boundary, and production
+evolution, read [`docs/STAGE6_MEMORY.md`](docs/STAGE6_MEMORY.md).

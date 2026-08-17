@@ -5,6 +5,9 @@ __pycache__/
 .streamlit/*
 !.streamlit/config.toml
 memory/history.json
+memory/*.db
+memory/*.db-shm
+memory/*.db-wal
 documents/raw/*
 !documents/raw/.gitkeep
 vector_store/*

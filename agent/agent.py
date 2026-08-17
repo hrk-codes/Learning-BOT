@@ -17,6 +17,8 @@ def run_agent(
     rag_pipeline: RagPipeline | None = None,
     rag_top_k: int = 4,
     rag_min_score: float = 0.25,
+    long_term_memory_context: dict | None = None,
+    memory_metrics: dict | None = None,
 ) -> AgentState:
     def ask_llm(messages: list[dict[str, str]]) -> str:
         return complete_chat_completion(
@@ -36,4 +38,6 @@ def run_agent(
         rag_pipeline=rag_pipeline,
         rag_top_k=rag_top_k,
         rag_min_score=rag_min_score,
+        long_term_memory_context=long_term_memory_context,
+        memory_metrics=memory_metrics,
     )

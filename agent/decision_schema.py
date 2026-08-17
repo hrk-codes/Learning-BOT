@@ -50,8 +50,13 @@ def parse_agent_decision(raw_text: str) -> AgentDecision:
 
     if action not in ALLOWED_ACTIONS:
         raise DecisionParseError(f"Unknown action: {action!r}")
-    if not isinstance(content, str) or not content.strip():
-        raise DecisionParseError("Decision content must be a non-empty string.")
+    if not isinstance(content, str):
+        raise DecisionParseError("Decision content must be a string.")
+    if not content.strip():
+        if action in {"RETRIEVE_KNOWLEDGE", "TOOL_CALL"}:
+            content = str(status).strip() or f"Executing {action.lower().replace('_', ' ')}."
+        else:
+            raise DecisionParseError("Decision content must be a non-empty string.")
     if not isinstance(finished, bool):
         raise DecisionParseError("Decision finished must be true or false.")
     if action == "TOOL_CALL":

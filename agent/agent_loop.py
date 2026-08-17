@@ -31,8 +31,19 @@ def run_agent_loop(
     rag_pipeline: "RagPipeline | None" = None,
     rag_top_k: int = 4,
     rag_min_score: float = 0.25,
+    long_term_memory_context: dict | None = None,
+    memory_metrics: dict | None = None,
 ) -> AgentState:
     state = AgentState(goal=goal, max_iterations=max_iterations)
+    if memory_metrics:
+        state.memory_candidate_count = int(memory_metrics.get("candidate_count", 0))
+        state.memory_retrieved_count = int(memory_metrics.get("retrieved_count", 0))
+        state.memory_injected_count = int(memory_metrics.get("injected_count", 0))
+        state.memory_retrieval_seconds = float(memory_metrics.get("retrieval_seconds", 0.0))
+        state.memory_ranking_seconds = float(memory_metrics.get("ranking_seconds", 0.0))
+        state.memory_context_characters = int(memory_metrics.get("context_characters", 0))
+        state.memory_context_tokens = int(memory_metrics.get("context_tokens", 0))
+        state.retrieved_memories = list(memory_metrics.get("retrieved_memories", []))
     logger.info("AGENT START goal=%s max_iterations=%s", goal, max_iterations)
 
     while state.status == "running":
@@ -57,6 +68,7 @@ def run_agent_loop(
                 llm_decision_fn=llm_decision_fn,
                 tool_manager=tool_manager,
                 rag_pipeline=rag_pipeline,
+                long_term_memory_context=long_term_memory_context,
             )
             route_action(
                 state,
@@ -99,6 +111,7 @@ def decide(
     llm_decision_fn: LLMDecisionFn,
     tool_manager: ToolManager,
     rag_pipeline: "RagPipeline | None",
+    long_term_memory_context: dict | None,
 ):
     context = build_agent_context(
         state,
@@ -106,6 +119,7 @@ def decide(
         observation,
         tool_manager,
         rag_pipeline,
+        long_term_memory_context,
     )
     state.llm_call_count += 1
     raw_decision = llm_decision_fn(context)
@@ -118,6 +132,7 @@ def build_agent_context(
     observation: str,
     tool_manager: ToolManager,
     rag_pipeline: "RagPipeline | None" = None,
+    long_term_memory_context: dict | None = None,
 ) -> list[dict[str, str]]:
     visible_trace = [
         {
@@ -147,6 +162,12 @@ def build_agent_context(
             if rag_pipeline is not None
             else {"available": False, "documents": []}
         ),
+        "long_term_memory": long_term_memory_context
+        or {
+            "available": False,
+            "records": [],
+            "instruction": "No relevant long-term memory was supplied for this request.",
+        },
     }
 
     return [
