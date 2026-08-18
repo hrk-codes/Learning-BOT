@@ -1,9 +1,9 @@
-# Learning-BOT: AI Systems Engineering, Stages 1-6
+# Learning-BOT: AI Systems Engineering, Stages 1-7
 
 Learning-BOT is one continuously evolving Streamlit project built to understand AI
 systems from first principles. It began as one raw HTTP request to a Groq LLM and now
 includes conversation history, a bounded agent runtime, controlled tools, document RAG,
-and governed long-term memory.
+governed long-term memory, and validated multi-step planning.
 
 The goal is not to collect popular frameworks. Each stage adds one capability only after
 the limitation of the previous stage becomes clear.
@@ -18,6 +18,7 @@ the limitation of the previous stage becomes clear.
 | 4 | Tool calling | How can the agent perform actions or obtain fresh data? | A model requests tools, but a permissioned runtime executes them. |
 | 5 | RAG knowledge | How can the agent answer from private/reference documents? | Retrieval supplies evidence; it does not train the model. |
 | 6 | Long-term memory | How can the agent retain useful user/project facts safely? | Memory is a governed data system, not a larger transcript. |
+| 7 | Planner and executor | How can the agent decompose and reliably execute complex goals? | Planning describes a DAG; Python validates, schedules, executes, evaluates, and bounds it. |
 
 ## Current Architecture
 
@@ -37,15 +38,13 @@ the limitation of the previous stage becomes clear.
                                         |
                                         v
                                   AGENT RUNTIME
-                           observe -> decide -> route
+                         simple -> reactive direct path
+                         complex -> validated planner DAG
                                         |
-                    +-------------------+-------------------+
-                    |                   |                   |
                     v                   v                   v
-              INTERNAL STEP      RETRIEVE_KNOWLEDGE      TOOL_CALL
-                                                            |
-                                                            v
-                                                    TOOL REGISTRY/MANAGER
+                EXECUTOR              RAG              TOOL MANAGER
+                    |                   |                   |
+                    +--------- MEMORY -+-------------------+
                     |                   |                   |
                     +-------------------+-------------------+
                                         |
@@ -65,6 +64,7 @@ the limitation of the previous stage becomes clear.
 | RAG | What do indexed reference documents say? | Saved PDFs plus vector index |
 | Tools | What action or fresh lookup should be performed? | One controlled execution |
 | Agent state | What is happening during this request? | One bounded agent run |
+| Plan state | What tasks, dependencies, outputs, and revisions exist for this complex goal? | One bounded planned run |
 | LLM | What should be generated or selected next? | Stateless API call unless context is supplied |
 
 Keeping these inputs separate makes behavior easier to secure, test, and debug.
@@ -615,13 +615,125 @@ SQLite structured memory
 
 ---
 
-## Project Structure After Stage 6
+## Stage 7: Planner, Dependency Graph, and Executor
+
+### Goal
+
+Handle genuinely complex goals as explicit, validated work instead of asking one reactive
+loop to improvise every next step.
+
+Planning is used selectively:
+
+```text
+User goal
+-> deterministic planning-need detector
+-> simple: Stage 6 direct agent path
+-> complex: planner -> validator -> DAG scheduler -> executor
+```
+
+The detector avoids adding planner LLM calls, tokens, and latency to simple questions.
+
+### Plan Contract
+
+Each planned task has an ID, description, capability, dependencies, required input keys,
+one output key, priority, retry budget, status, result, and error. Plans are machine-readable
+JSON rather than numbered prose.
+
+```text
+PENDING -> READY -> RUNNING -> COMPLETED
+                      |
+                      +-> FAILED
+
+Dependency failure -> downstream BLOCKED
+Cancellation       -> unstarted CANCELLED
+```
+
+The validator rejects duplicate or malformed IDs, unknown dependencies, dependency cycles,
+oversized plans, unavailable capabilities, invalid dataflow, and excessive retry budgets
+before execution starts.
+
+### Responsibility Boundaries
+
+```text
+Planner       = proposes tasks and dependencies
+Validator     = proves the plan fits runtime contracts
+Scheduler     = finds tasks whose dependencies and inputs are ready
+Executor      = invokes the existing LLM, tools, RAG, or memory boundary
+Replanner     = adds bounded replacement work without rewriting completed history
+Goal evaluator = checks whether results satisfy the original goal
+Agent runtime = coordinates lifecycle, limits, cancellation, and final response
+```
+
+Planning is intent, not authority. Tool schemas, enabled-tool checks, and permission rules
+still run inside `ToolManager`. Side-effecting tools remain blocked without explicit user
+confirmation.
+
+### Hybrid Replanning
+
+The runtime creates an initial roadmap and executes ready tasks sequentially. Independent
+tasks can be READY at the same time, preserving a future path to controlled parallelism.
+Replanning is considered only after missing results, critical failures, invalid assumptions,
+or goal-evaluation gaps, and revisions are capped.
+
+Completed tasks and outputs are immutable during replanning. Failed and blocked work remains
+visible as history rather than being silently erased.
+
+### Why Goal Evaluation Is Separate
+
+```text
+All tasks completed != original goal satisfied
+```
+
+After no runnable work remains, a dedicated evaluator inspects the goal, task statuses, and
+results. Python prevents completion if required tasks are unfinished, but completion still
+requires a positive goal evaluation and a usable final answer.
+
+### How To Verify The Concept
+
+1. Ask `What is an API?` and confirm `Agent Execution` shows `mode: direct`.
+2. Ask `Research PostgreSQL and MySQL, compare their tradeoffs, and recommend one for a small AI product.`
+3. Open `Execution Plan` and inspect task IDs, capabilities, dependencies, READY/RUNNING/COMPLETED states, outputs, and metrics.
+4. Disable a tool and submit a goal that requires it. Confirm invalid tool plans are repaired or rejected before execution.
+5. Upload the sample handbook, store a relevant preference, then request a comparison using the document, preference, and an exact calculation.
+6. Inspect lifecycle events for plan validation, task attempts, goal evaluation, and any bounded revision.
+7. Run `python -m pytest -q test_planner.py` for cycle, failure, retry, permission, cancellation, replanning, and combined capability tests.
+
+### Main Files
+
+```text
+planner/models.py             Plan, task, result, status, event, and metrics contracts
+planner/planning_need.py      Simple-versus-complex deterministic gate
+planner/plan_validator.py     Structural, DAG, dataflow, and capability validation
+planner/dependency_graph.py   Cycle and downstream dependency analysis
+planner/scheduler.py          READY selection and BLOCKED/CANCELLED propagation
+planner/planner.py            Structured plan generation plus bounded repair
+planner/replanner.py          Bounded revisions that preserve completed work
+planner/goal_evaluator.py     Goal satisfaction contract and final synthesis
+planner/runtime.py            Planned lifecycle coordinator
+executor/task_runner.py       Existing LLM/tool/RAG/memory capability adapters
+executor/executor.py          Status transitions, attempts, retries, and outputs
+executor/retry_policy.py      Transient-only bounded retry decision
+agent/planned_agent.py        Application-to-planning-runtime composition root
+docs/STAGE7_PLANNER.md        Deep architecture and testing guide
+```
+
+### Limitation And Next Evolution
+
+Stage 7 V1 is process-local and sequential. It deliberately does not add multi-agent
+delegation, distributed workflow workers, arbitrary code execution, or durable workflow
+resumption. Those require demonstrated product and reliability needs.
+
+---
+
+## Project Structure After Stage 7
 
 ```text
 app.py                         Streamlit UI and workflow coordination
 config.py                      Environment and application configuration
 
 agent/                         Bounded agent state, decisions, loop, routing
+planner/                       Plan contracts, validation, DAG, scheduling, replanning
+executor/                      Capability execution and retry policy
 llm/groq_client.py             Raw Groq HTTP/SSE client and rate-limit handling
 prompts/                       System, agent, RAG grounding prompts
 
@@ -640,7 +752,7 @@ rag/                           PDF ingestion, embeddings, retrieval, context
 documents/sample/              Controlled PDFs for testing
 documents/raw/                 Uploaded PDFs, ignored by Git
 vector_store/                  Generated RAG vectors, ignored by Git
-docs/                          Stage 5 and Stage 6 deep documentation
+docs/                          Stage 5, Stage 6, and Stage 7 deep documentation
 
 test_memory.py                 Stage 2 tests
 test_agent.py                  Stage 3/4/5/6 agent tests
@@ -648,6 +760,7 @@ test_tools.py                  Stage 4 tests
 test_rag.py                    Stage 5 tests
 test_long_term_memory.py       Stage 6 tests
 test_llm.py                    Groq retry/gate/redaction tests
+test_planner.py                Stage 7 planner, DAG, executor, and lifecycle tests
 ```
 
 ## Setup
@@ -675,6 +788,7 @@ Important configuration groups are documented in `.env.example`:
 GROQ_*                Model, output, timeout, and bounded 429 retry settings
 CHAT_HISTORY_*        Stage 2 persistence and context window
 MAX_AGENT_ITERATIONS  Stage 3 loop limit
+PLANNER_*             Stage 7 plan size, revisions, execution, repair, and retry limits
 RAG_*                 Stage 5 documents, embeddings, chunks, ranking, context
 LONG_TERM_MEMORY_*    Stage 6 database, identity, retrieval, and budget
 ```
@@ -720,7 +834,7 @@ python -m pytest -q
 Current verified result:
 
 ```text
-40 passed
+55 passed
 ```
 
 There is one harmless Pytest collection warning because the Stage 5 test embedding helper
@@ -764,6 +878,9 @@ Stage 3-4 controlled execution
 Stage 5-6 knowledge and personalization
     RAG vectors + SQLite long-term memory
 
+Stage 7 complex goal execution
+    Validated DAG + bounded executor + goal evaluator
+
 Hosted production
     Web API + authentication + PostgreSQL + background jobs + observability
 
@@ -778,3 +895,4 @@ measured problem requires it, not because the technology is popular.
 
 - [Stage 5 RAG architecture](docs/STAGE5_RAG.md)
 - [Stage 6 long-term memory architecture](docs/STAGE6_MEMORY.md)
+- [Stage 7 planner and executor architecture](docs/STAGE7_PLANNER.md)

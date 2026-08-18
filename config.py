@@ -29,6 +29,14 @@ class AppConfig:
     long_term_memory_retrieval_limit: int
     long_term_memory_context_max_chars: int
     max_agent_iterations: int
+    planner_enabled: bool
+    planner_temperature: float
+    planner_min_output_tokens: int
+    planner_max_tasks: int
+    planner_max_revisions: int
+    planner_max_execution_steps: int
+    planner_max_task_retries: int
+    planner_max_repair_attempts: int
     rag_documents_path: Path
     rag_vector_store_path: Path
     rag_embedding_model: str
@@ -85,6 +93,20 @@ def get_config() -> AppConfig:
             os.getenv("LONG_TERM_MEMORY_CONTEXT_MAX_CHARS", "4000")
         ),
         max_agent_iterations=int(os.getenv("MAX_AGENT_ITERATIONS", "4")),
+        planner_enabled=_read_bool("PLANNER_ENABLED", True),
+        planner_temperature=float(os.getenv("PLANNER_TEMPERATURE", "0.1")),
+        planner_min_output_tokens=int(os.getenv("PLANNER_MIN_OUTPUT_TOKENS", "1200")),
+        planner_max_tasks=int(os.getenv("PLANNER_MAX_TASKS", "8")),
+        planner_max_revisions=int(os.getenv("PLANNER_MAX_REVISIONS", "2")),
+        planner_max_execution_steps=int(
+            os.getenv("PLANNER_MAX_EXECUTION_STEPS", "12")
+        ),
+        planner_max_task_retries=int(
+            os.getenv("PLANNER_MAX_TASK_RETRIES", "1")
+        ),
+        planner_max_repair_attempts=int(
+            os.getenv("PLANNER_MAX_REPAIR_ATTEMPTS", "1")
+        ),
         rag_documents_path=rag_documents_path,
         rag_vector_store_path=rag_vector_store_path,
         rag_embedding_model=os.getenv(

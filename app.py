@@ -5,12 +5,16 @@ from pathlib import Path
 import streamlit as st
 
 from agent.agent import run_agent
+from agent.planned_agent import run_planned_agent
 from config import AppConfig, get_config
 from llm.groq_client import GroqClientError
 from memory.chat_memory import ChatMemory
 from memory.models import MemoryCandidate, MemoryScope, MemorySource, MemoryType
 from memory.repository import MemoryRepositoryError, SQLiteMemoryRepository
 from memory.service import MemoryService, MemoryServiceError
+from planner.models import PlanState
+from planner.planner import PlannerError
+from planner.planning_need import PlanningDecision, PlanningNeedDetector
 from rag.embeddings.embedder import SentenceTransformerEmbedder
 from rag.ingestion.chunker import FixedWindowChunker
 from rag.ingestion.parser import PdfParser
@@ -55,8 +59,8 @@ def build_rag_pipeline(
 
 def main() -> None:
     config = get_config()
-    st.set_page_config(page_title="Stage 6 Memory Agent", page_icon="AI", layout="centered")
-    st.title("Stage 6 Long-Term Memory Agent")
+    st.set_page_config(page_title="Stage 7 Planner Agent", page_icon="AI", layout="centered")
+    st.title("Stage 7 Planner and Executor Agent")
 
     chat_memory = ChatMemory(
         history_path=config.history_path,
@@ -84,6 +88,8 @@ def main() -> None:
         st.session_state.enabled_tools = {tool.name for tool in tool_registry.list_tools()}
     if "long_term_memory_enabled" not in st.session_state:
         st.session_state.long_term_memory_enabled = config.long_term_memory_enabled
+    if "planner_enabled" not in st.session_state:
+        st.session_state.planner_enabled = config.planner_enabled
 
     memory_service = _build_memory_service(config)
 
@@ -123,6 +129,21 @@ def main() -> None:
 
         st.header("Agent Runtime")
         st.caption(f"Max iterations: {config.max_agent_iterations}")
+
+        st.header("Planner Runtime")
+        st.toggle(
+            "Automatic planning",
+            key="planner_enabled",
+            help=(
+                "Complex goals use a validated task graph. Simple questions keep the "
+                "lower-latency Stage 6 agent path."
+            ),
+        )
+        st.caption(
+            f"Up to {config.planner_max_tasks} tasks, "
+            f"{config.planner_max_revisions} revisions, and "
+            f"{config.planner_max_execution_steps} execution attempts"
+        )
 
         st.header("RAG Retrieval")
         rag_top_k = st.slider(
@@ -224,74 +245,79 @@ def main() -> None:
     )
     memory_metrics = _build_memory_metrics(retrieval, memory_context)
     memory_metrics["extraction_candidate_count"] = extraction_count
+    planning_decision = PlanningNeedDetector().detect(user_goal)
+    use_planner = bool(
+        st.session_state.planner_enabled and planning_decision.needs_planning
+    )
+    agent_state = None
+    plan_state = None
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
 
         try:
-            status_placeholder.info("Agent is observing the goal and deciding what to do next...")
-            agent_state = run_agent(
-                config=config,
-                goal=user_goal,
-                conversation_context=conversation_context,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                tool_manager=tool_manager,
-                rag_pipeline=rag_pipeline,
-                rag_top_k=rag_top_k,
-                rag_min_score=rag_min_score,
-                long_term_memory_context=memory_context.payload if memory_context else None,
-                memory_metrics=memory_metrics,
-            )
-        except GroqClientError as exc:
+            if use_planner:
+                status_placeholder.info("Creating and validating an execution plan...")
+                plan_state = run_planned_agent(
+                    config=config,
+                    goal=user_goal,
+                    conversation_context=conversation_context,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tool_manager=tool_manager,
+                    rag_pipeline=rag_pipeline,
+                    rag_top_k=rag_top_k,
+                    rag_min_score=rag_min_score,
+                    long_term_memory_context=(
+                        memory_context.payload if memory_context else None
+                    ),
+                    memory_search_fn=_build_planner_memory_search(
+                        memory_service, config
+                    ),
+                    status_callback=lambda state: _update_plan_status(
+                        status_placeholder, state
+                    ),
+                )
+                final_answer = plan_state.final_answer
+            else:
+                status_placeholder.info(
+                    "Using the direct agent path for this simple request..."
+                )
+                agent_state = run_agent(
+                    config=config,
+                    goal=user_goal,
+                    conversation_context=conversation_context,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tool_manager=tool_manager,
+                    rag_pipeline=rag_pipeline,
+                    rag_top_k=rag_top_k,
+                    rag_min_score=rag_min_score,
+                    long_term_memory_context=(
+                        memory_context.payload if memory_context else None
+                    ),
+                    memory_metrics=memory_metrics,
+                )
+                final_answer = agent_state.final_answer
+        except (GroqClientError, PlannerError) as exc:
             st.error(str(exc))
             return
 
         status_placeholder.empty()
-        st.markdown(agent_state.final_answer)
+        st.markdown(final_answer)
 
-        with st.expander("Agent Execution"):
-            st.write(
-                {
-                    "goal": agent_state.goal,
-                    "status": agent_state.status,
-                    "iterations": agent_state.iteration_count,
-                    "max_iterations": agent_state.max_iterations,
-                    "llm_calls": agent_state.llm_call_count,
-                    "tool_calls": agent_state.tool_call_count,
-                    "tool_latency_seconds": round(agent_state.total_tool_latency_seconds, 4),
-                    "rag_retrievals": agent_state.rag_retrieval_count,
-                    "rag_latency_seconds": round(agent_state.total_rag_latency_seconds, 4),
-                    "memory_candidates": extraction_count,
-                    "memory_retrieved": agent_state.memory_retrieved_count,
-                    "memory_injected": agent_state.memory_injected_count,
-                    "memory_retrieval_seconds": round(agent_state.memory_retrieval_seconds, 4),
-                    "memory_context_tokens_approx": agent_state.memory_context_tokens,
-                    "active_tools": sorted(st.session_state.enabled_tools),
-                }
+        if plan_state is not None:
+            _render_plan_execution(plan_state, planning_decision)
+        elif agent_state is not None:
+            _render_direct_agent_execution(
+                agent_state,
+                extraction_count=extraction_count,
+                planning_decision=planning_decision,
             )
-            for step in agent_state.trace:
-                trace_data = {
-                    "iteration": step.iteration,
-                    "action": step.action,
-                    "status": step.status,
-                    "observation": step.observation,
-                }
-                if step.tool_name:
-                    trace_data["tool_name"] = step.tool_name
-                    trace_data["tool_arguments"] = step.tool_arguments
-                    trace_data["tool_result"] = step.tool_result
-                    trace_data["elapsed_seconds"] = round(step.elapsed_seconds, 4)
-                if step.retrieval_query:
-                    trace_data["retrieval_query"] = step.retrieval_query
-                    trace_data["retrieved_chunk_count"] = len(step.retrieved_chunks or [])
-                    trace_data["retrieval_latency_seconds"] = round(
-                        step.retrieval_latency_seconds, 4
-                    )
-                st.write(trace_data)
 
-        if extraction_count or agent_state.memory_candidate_count:
+        if extraction_count or retrieval is not None:
             with st.expander("Memory Debug"):
                 st.write(
                     {
@@ -301,36 +327,180 @@ def main() -> None:
                         "database_seconds": round(
                             retrieval.metrics.database_seconds if retrieval else 0.0, 4
                         ),
-                        "ranking_seconds": round(agent_state.memory_ranking_seconds, 4),
-                        "context_characters": agent_state.memory_context_characters,
-                        "context_tokens_approx": agent_state.memory_context_tokens,
-                        "retrieved": agent_state.retrieved_memories,
+                        "ranking_seconds": round(
+                            retrieval.metrics.ranking_seconds if retrieval else 0.0, 4
+                        ),
+                        "context_characters": (
+                            memory_context.character_count if memory_context else 0
+                        ),
+                        "context_tokens_approx": (
+                            memory_context.approximate_tokens if memory_context else 0
+                        ),
+                        "retrieved": memory_metrics.get("retrieved_memories", []),
                     }
                 )
 
-        retrieval_steps = [step for step in agent_state.trace if step.retrieval_query]
-        if retrieval_steps:
+        _render_rag_debug(agent_state=agent_state, plan_state=plan_state)
+
+    chat_memory.add_message(st.session_state.messages, "assistant", final_answer)
+    chat_memory.save_history(st.session_state.messages)
+
+
+def _build_planner_memory_search(memory_service, config):
+    if memory_service is None or not memory_service.enabled:
+        return None
+
+    def search_memory(query: str) -> dict:
+        retrieval = memory_service.search(
+            query,
+            user_id=config.long_term_memory_user_id,
+            project_id=config.long_term_memory_project_id,
+        )
+        return memory_service.build_context(retrieval).payload
+
+    return search_memory
+
+
+def _update_plan_status(placeholder, state: PlanState) -> None:
+    completed, total = state.progress()
+    active = f" Active task: {state.active_task_id}." if state.active_task_id else ""
+    placeholder.info(
+        f"Plan {state.status.value}: {completed}/{total} required tasks complete."
+        f" Revision {state.revision}.{active}"
+    )
+
+
+def _render_plan_execution(
+    plan_state: PlanState, planning_decision: PlanningDecision
+) -> None:
+    with st.expander("Execution Plan", expanded=True):
+        completed, total = plan_state.progress()
+        st.progress(completed / total if total else 0.0)
+        st.write(
+            {
+                "mode": "planned",
+                "status": plan_state.status.value,
+                "planning_score": planning_decision.score,
+                "planning_reasons": list(planning_decision.reasons),
+                "revision": plan_state.revision,
+                "execution_steps": plan_state.execution_steps,
+                "progress": f"{completed}/{total}",
+                "output_keys": sorted(plan_state.outputs),
+                **plan_state.public_summary()["metrics"],
+            }
+        )
+        st.dataframe(
+            [task.public_summary() for task in plan_state.tasks],
+            use_container_width=True,
+            hide_index=True,
+        )
+        with st.expander("Plan lifecycle events"):
+            st.json(
+                [
+                    {
+                        "event": event.event_type,
+                        "task_id": event.task_id,
+                        "message": event.message,
+                        "metadata": event.metadata,
+                        "timestamp": event.timestamp,
+                    }
+                    for event in plan_state.events
+                ]
+            )
+
+
+def _render_direct_agent_execution(
+    agent_state,
+    *,
+    extraction_count: int,
+    planning_decision: PlanningDecision,
+) -> None:
+    with st.expander("Agent Execution"):
+        st.write(
+            {
+                "mode": "direct",
+                "planning_score": planning_decision.score,
+                "planning_reasons": list(planning_decision.reasons),
+                "goal": agent_state.goal,
+                "status": agent_state.status,
+                "iterations": agent_state.iteration_count,
+                "max_iterations": agent_state.max_iterations,
+                "llm_calls": agent_state.llm_call_count,
+                "tool_calls": agent_state.tool_call_count,
+                "tool_latency_seconds": round(agent_state.total_tool_latency_seconds, 4),
+                "rag_retrievals": agent_state.rag_retrieval_count,
+                "rag_latency_seconds": round(agent_state.total_rag_latency_seconds, 4),
+                "memory_candidates": extraction_count,
+                "memory_retrieved": agent_state.memory_retrieved_count,
+                "memory_injected": agent_state.memory_injected_count,
+                "memory_retrieval_seconds": round(agent_state.memory_retrieval_seconds, 4),
+                "memory_context_tokens_approx": agent_state.memory_context_tokens,
+                "active_tools": sorted(st.session_state.enabled_tools),
+            }
+        )
+        for step in agent_state.trace:
+            trace_data = {
+                "iteration": step.iteration,
+                "action": step.action,
+                "status": step.status,
+                "observation": step.observation,
+            }
+            if step.tool_name:
+                trace_data["tool_name"] = step.tool_name
+                trace_data["tool_arguments"] = step.tool_arguments
+                trace_data["tool_result"] = step.tool_result
+                trace_data["elapsed_seconds"] = round(step.elapsed_seconds, 4)
+            if step.retrieval_query:
+                trace_data["retrieval_query"] = step.retrieval_query
+                trace_data["retrieved_chunk_count"] = len(step.retrieved_chunks or [])
+                trace_data["retrieval_latency_seconds"] = round(
+                    step.retrieval_latency_seconds, 4
+                )
+            st.write(trace_data)
+
+
+def _render_rag_debug(*, agent_state, plan_state: PlanState | None) -> None:
+    if plan_state is not None:
+        retrieval_tasks = [
+            task
+            for task in plan_state.tasks
+            if task.result is not None and task.result.sources
+        ]
+        if retrieval_tasks:
             with st.expander("RAG Debug"):
-                for step in retrieval_steps:
+                for task in retrieval_tasks:
                     st.write(
                         {
-                            "query": step.retrieval_query,
-                            "latency_seconds": round(step.retrieval_latency_seconds, 4),
-                            "retrieved": [
-                                {
-                                    "chunk_id": chunk.get("chunk_id"),
-                                    "score": round(float(chunk.get("score", 0.0)), 4),
-                                    "filename": chunk.get("metadata", {}).get("filename"),
-                                    "page_number": chunk.get("metadata", {}).get("page_number"),
-                                    "document_id": chunk.get("document_id"),
-                                }
-                                for chunk in (step.retrieved_chunks or [])
-                            ],
+                            "task_id": task.task_id,
+                            "query": task.result.metadata.get("query"),
+                            "latency_seconds": round(task.result.duration_seconds, 4),
+                            "retrieved": list(task.result.sources),
                         }
                     )
+        return
 
-    chat_memory.add_message(st.session_state.messages, "assistant", agent_state.final_answer)
-    chat_memory.save_history(st.session_state.messages)
+    if agent_state is None:
+        return
+    retrieval_steps = [step for step in agent_state.trace if step.retrieval_query]
+    if retrieval_steps:
+        with st.expander("RAG Debug"):
+            for step in retrieval_steps:
+                st.write(
+                    {
+                        "query": step.retrieval_query,
+                        "latency_seconds": round(step.retrieval_latency_seconds, 4),
+                        "retrieved": [
+                            {
+                                "chunk_id": chunk.get("chunk_id"),
+                                "score": round(float(chunk.get("score", 0.0)), 4),
+                                "filename": chunk.get("metadata", {}).get("filename"),
+                                "page_number": chunk.get("metadata", {}).get("page_number"),
+                                "document_id": chunk.get("document_id"),
+                            }
+                            for chunk in (step.retrieved_chunks or [])
+                        ],
+                    }
+                )
 
 
 def _build_memory_service(config: AppConfig) -> MemoryService | None:
