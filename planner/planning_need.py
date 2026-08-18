@@ -25,6 +25,15 @@ class PlanningNeedDetector:
         score = 0
         reasons: list[str] = []
 
+        if re.search(
+            r"\b(send\b.{0,80}\b(?:email|message|update)|"
+            r"delete (?:a |the )?(?:file|data|record)|"
+            r"make (?:a )?payment|purchase|book and pay|update (?:the )?database)\b",
+            normalized,
+        ):
+            score += 3
+            reasons.append("consequential action requires an approval-aware workflow")
+
         for reason, pattern in self.COMPLEX_PATTERNS.items():
             if re.search(pattern, normalized):
                 score += 2
@@ -45,4 +54,3 @@ class PlanningNeedDetector:
             score=score,
             reasons=tuple(reasons),
         )
-

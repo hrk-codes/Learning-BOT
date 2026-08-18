@@ -3,6 +3,7 @@ import time
 
 from executor.retry_policy import RetryPolicy
 from executor.task_runner import TaskRunner
+from approval.gate import GateStatus
 from planner.models import PlanState, PlanTask, TaskResult, TaskStatus, utc_now_iso
 
 
@@ -22,14 +23,31 @@ class TaskExecutor:
         self.max_execution_steps = max(1, max_execution_steps)
 
     def execute(self, task: PlanTask, state: PlanState) -> TaskResult:
-        if task.status != TaskStatus.READY:
+        if task.status not in {
+            TaskStatus.READY,
+            TaskStatus.WAITING_FOR_APPROVAL,
+            TaskStatus.APPROVED,
+        }:
             raise ValueError(f"Task {task.task_id!r} is not ready for execution.")
 
         started = time.perf_counter()
-        task.status = TaskStatus.RUNNING
-        task.started_at = utc_now_iso()
+        gate = self.runner.check_approval(task, state)
+        if gate.status != GateStatus.PROCEED:
+            return self._handle_gate_stop(task, state, gate, started)
+
+        task.status = (
+            TaskStatus.APPROVED if gate.approved_action else TaskStatus.RUNNING
+        )
+        task.started_at = task.started_at or utc_now_iso()
         state.active_task_id = task.task_id
-        state.record_event("TASK STARTED", task_id=task.task_id)
+        state.record_event(
+            "TASK APPROVED" if gate.approved_action else "TASK STARTED",
+            task_id=task.task_id,
+            metadata={
+                "action_id": task.action_id,
+                "action_version": task.action_version,
+            },
+        )
         logger.info(
             "TASK STARTED task_id=%s capability=%s",
             task.task_id,
@@ -51,7 +69,18 @@ class TaskExecutor:
 
             task.attempts += 1
             state.execution_steps += 1
-            result = self.runner.run(task, state)
+            if gate.approved_action:
+                task.status = TaskStatus.EXECUTING
+                state.record_event(
+                    "ACTION EXECUTING",
+                    task_id=task.task_id,
+                    metadata={"action_id": task.action_id},
+                )
+            result = self.runner.run(
+                task,
+                state,
+                approved_action=gate.approved_action,
+            )
             state.record_event(
                 "TASK_ATTEMPT",
                 task_id=task.task_id,
@@ -102,3 +131,45 @@ class TaskExecutor:
             logger.error("TASK FAILED task_id=%s attempts=%s", task.task_id, task.attempts)
         return result
 
+    def _handle_gate_stop(self, task, state, gate, started) -> TaskResult:
+        status_map = {
+            GateStatus.WAITING: TaskStatus.WAITING_FOR_APPROVAL,
+            GateStatus.DENIED: TaskStatus.DENIED,
+            GateStatus.CANCELLED: TaskStatus.CANCELLED,
+            GateStatus.EXPIRED: TaskStatus.EXPIRED,
+            GateStatus.FAILED: TaskStatus.FAILED,
+        }
+        task_status = status_map[gate.status]
+        task.status = task_status
+        task.error = gate.message
+        state.active_task_id = None
+        event_name = {
+            GateStatus.WAITING: "APPROVAL REQUESTED",
+            GateStatus.DENIED: "ACTION DENIED",
+            GateStatus.CANCELLED: "ACTION CANCELLED",
+            GateStatus.EXPIRED: "APPROVAL EXPIRED",
+            GateStatus.FAILED: "APPROVAL FAILED CLOSED",
+        }[gate.status]
+        state.record_event(
+            event_name,
+            task_id=task.task_id,
+            message=gate.message,
+            metadata=gate.metadata,
+        )
+        result = TaskResult(
+            task_id=task.task_id,
+            status=task_status,
+            error=gate.message,
+            metadata=gate.metadata,
+            duration_seconds=time.perf_counter() - started,
+            attempt=task.attempts,
+        )
+        if gate.status != GateStatus.WAITING:
+            task.result = result
+            task.completed_at = utc_now_iso()
+        logger.info(
+            "APPROVAL GATE task_id=%s status=%s",
+            task.task_id,
+            gate.status.value,
+        )
+        return result

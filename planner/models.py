@@ -15,9 +15,14 @@ class TaskStatus(str, Enum):
     PENDING = "pending"
     READY = "ready"
     RUNNING = "running"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
+    APPROVED = "approved"
+    EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    DENIED = "denied"
+    EXPIRED = "expired"
     CANCELLED = "cancelled"
 
 
@@ -25,6 +30,7 @@ class PlanStatus(str, Enum):
     PLANNING = "planning"
     VALIDATED = "validated"
     RUNNING = "running"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     EVALUATING = "evaluating"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -69,6 +75,10 @@ class PlanTask:
     attempts: int = 0
     result: TaskResult | None = None
     error: str | None = None
+    action_id: str | None = None
+    action_version: int | None = None
+    approval_id: str | None = None
+    execution_receipt_id: str | None = None
     created_at: str = field(default_factory=utc_now_iso)
     started_at: str | None = None
     completed_at: str | None = None
@@ -91,6 +101,10 @@ class PlanTask:
                 self.result.duration_seconds if self.result else 0.0, 4
             ),
             "error": self.error,
+            "action_id": self.action_id,
+            "action_version": self.action_version,
+            "approval_id": self.approval_id,
+            "execution_receipt_id": self.execution_receipt_id,
         }
 
 
@@ -116,6 +130,13 @@ class PlanMetrics:
     tool_calls: int = 0
     rag_retrievals: int = 0
     memory_retrievals: int = 0
+    approval_requests: int = 0
+    approvals_granted: int = 0
+    approvals_denied: int = 0
+    approvals_expired: int = 0
+    actions_edited: int = 0
+    approval_wait_seconds: float = 0.0
+    risk_assessment_seconds: float = 0.0
 
 
 @dataclass
@@ -200,6 +221,16 @@ class PlanState:
                 "tool_calls": self.metrics.tool_calls,
                 "rag_retrievals": self.metrics.rag_retrievals,
                 "memory_retrievals": self.metrics.memory_retrievals,
+                "approval_requests": self.metrics.approval_requests,
+                "approvals_granted": self.metrics.approvals_granted,
+                "approvals_denied": self.metrics.approvals_denied,
+                "approvals_expired": self.metrics.approvals_expired,
+                "actions_edited": self.metrics.actions_edited,
+                "approval_wait_seconds": round(
+                    self.metrics.approval_wait_seconds, 4
+                ),
+                "risk_assessment_seconds": round(
+                    self.metrics.risk_assessment_seconds, 4
+                ),
             },
         }
-

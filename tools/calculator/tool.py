@@ -2,6 +2,7 @@ import ast
 import operator
 from typing import Any
 
+from approval.models import RiskLevel, SideEffectType
 from tools.base import ToolDefinition, ToolResult
 
 
@@ -38,6 +39,8 @@ def build_calculator_tool() -> ToolDefinition:
         timeout_seconds=2,
         version="1.0",
         execute=_execute,
+        risk_level=RiskLevel.LOW,
+        side_effect=SideEffectType.NONE,
     )
 
 

@@ -6,7 +6,13 @@ from tools.manager import ToolManager
 def test_registry_lists_default_tools() -> None:
     registry = build_default_registry()
     names = {tool.name for tool in registry.list_tools()}
-    assert names == {"calculator.evaluate", "weather.get_current", "search.web"}
+    assert names == {
+        "calculator.evaluate",
+        "weather.get_current",
+        "search.web",
+        "email.send_mock",
+        "files.delete_mock",
+    }
 
 
 def test_calculator_rejects_unsafe_expression() -> None:

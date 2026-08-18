@@ -13,7 +13,13 @@ class TaskScheduler:
             if any(
                 dependency is None
                 or dependency.status
-                in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+                in {
+                    TaskStatus.FAILED,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.DENIED,
+                    TaskStatus.EXPIRED,
+                    TaskStatus.CANCELLED,
+                }
                 for dependency in dependencies
             ):
                 task.status = TaskStatus.BLOCKED

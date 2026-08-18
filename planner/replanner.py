@@ -51,6 +51,44 @@ class Replanner:
                     goal=state.goal,
                     default_task_retries=self.default_task_retries,
                 )
+                denied_tools = {
+                    task.tool_name
+                    for task in state.tasks
+                    if task.status in {TaskStatus.DENIED, TaskStatus.CANCELLED}
+                    and task.tool_name
+                }
+                repeated_denied = [
+                    task.tool_name
+                    for task in additions.tasks
+                    if task.tool_name in denied_tools
+                ]
+                if repeated_denied:
+                    raise PlanValidationError(
+                        [
+                            "A denied or cancelled action cannot be proposed again in "
+                            f"this workflow: {', '.join(sorted(set(repeated_denied)))}."
+                        ]
+                    )
+                completed_action_tools = {
+                    task.tool_name
+                    for task in state.tasks
+                    if task.status == TaskStatus.COMPLETED
+                    and task.action_id
+                    and task.tool_name
+                }
+                repeated_completed_action = [
+                    task.tool_name
+                    for task in additions.tasks
+                    if task.tool_name in completed_action_tools
+                ]
+                if repeated_completed_action:
+                    raise PlanValidationError(
+                        [
+                            "A completed approval-bound side effect cannot be repeated "
+                            "during replanning: "
+                            f"{', '.join(sorted(set(repeated_completed_action)))}."
+                        ]
+                    )
                 self._retire_unfinished(candidate)
                 candidate.tasks.extend(additions.tasks)
                 candidate.assumptions = tuple(
@@ -139,4 +177,3 @@ class Replanner:
                 if task.status in {TaskStatus.PENDING, TaskStatus.READY}:
                     task.status = TaskStatus.CANCELLED
                     task.error = "Superseded by a revised plan."
-

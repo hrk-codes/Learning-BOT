@@ -2,6 +2,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
+from approval.models import (
+    ActionProposal,
+    ActionStatus,
+    RiskLevel,
+    SideEffectType,
+    calculate_action_digest,
+)
 from tools.schemas import SchemaValidationError, validate_object_schema
 
 
@@ -27,6 +34,11 @@ class ToolDefinition:
     timeout_seconds: int
     version: str
     execute: Callable[[dict[str, Any]], ToolResult]
+    risk_level: RiskLevel = RiskLevel.LOW
+    side_effect: SideEffectType = SideEffectType.NONE
+    supports_preview: bool = False
+    requires_confirmation: bool = False
+    preview_builder: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def to_model_description(self) -> dict[str, Any]:
         return {
@@ -35,6 +47,23 @@ class ToolDefinition:
             "input_schema": self.input_schema,
             "permission": self.permission,
             "version": self.version,
+            "risk_level": self.risk_level.value,
+            "side_effect": self.side_effect.value,
+            "supports_preview": self.supports_preview,
+            "requires_confirmation": self.requires_confirmation,
+        }
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return validate_object_schema(arguments, self.input_schema)
+
+    def build_preview(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        clean_arguments = self.validate_arguments(arguments)
+        if self.preview_builder is not None:
+            return self.preview_builder(clean_arguments)
+        return {
+            "title": self.description,
+            "impact": f"Run {self.name} with the displayed arguments.",
+            "arguments": clean_arguments,
         }
 
     def run(self, arguments: dict[str, Any]) -> ToolResult:
@@ -42,7 +71,7 @@ class ToolDefinition:
         # the runtime boundary that keeps "LLM requested it" separate from
         # "runtime authorized and executed it."
         try:
-            clean_arguments = validate_object_schema(arguments, self.input_schema)
+            clean_arguments = self.validate_arguments(arguments)
         except SchemaValidationError as exc:
             return ToolResult(
                 success=False,
@@ -68,3 +97,16 @@ class ToolDefinition:
             metadata={**result.metadata, "tool": self.name},
             elapsed_seconds=time.perf_counter() - started_at,
         )
+
+    def matches_approved_action(
+        self, proposal: ActionProposal, arguments: dict[str, Any]
+    ) -> bool:
+        if proposal.status not in {ActionStatus.APPROVED, ActionStatus.EXECUTING}:
+            return False
+        if proposal.tool_name != self.name or proposal.tool_version != self.version:
+            return False
+        clean_arguments = self.validate_arguments(arguments)
+        digest = calculate_action_digest(
+            self.name, self.version, proposal.version, clean_arguments
+        )
+        return digest == proposal.argument_digest and clean_arguments == proposal.arguments

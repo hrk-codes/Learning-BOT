@@ -1,9 +1,10 @@
-# Learning-BOT: AI Systems Engineering, Stages 1-7
+# Learning-BOT: AI Systems Engineering, Stages 1-8
 
 Learning-BOT is one continuously evolving Streamlit project built to understand AI
 systems from first principles. It began as one raw HTTP request to a Groq LLM and now
 includes conversation history, a bounded agent runtime, controlled tools, document RAG,
-governed long-term memory, and validated multi-step planning.
+governed long-term memory, validated multi-step planning, and version-locked human approval
+for consequential actions.
 
 The goal is not to collect popular frameworks. Each stage adds one capability only after
 the limitation of the previous stage becomes clear.
@@ -19,6 +20,7 @@ the limitation of the previous stage becomes clear.
 | 5 | RAG knowledge | How can the agent answer from private/reference documents? | Retrieval supplies evidence; it does not train the model. |
 | 6 | Long-term memory | How can the agent retain useful user/project facts safely? | Memory is a governed data system, not a larger transcript. |
 | 7 | Planner and executor | How can the agent decompose and reliably execute complex goals? | Planning describes a DAG; Python validates, schedules, executes, evaluates, and bounds it. |
+| 8 | Human approval and risk control | How can a plan pause safely before a consequential action? | The model proposes; runtime policy validates; the human approves one exact version; the executor records the outcome. |
 
 ## Current Architecture
 
@@ -45,14 +47,24 @@ the limitation of the previous stage becomes clear.
                 EXECUTOR              RAG              TOOL MANAGER
                     |                   |                   |
                     +--------- MEMORY -+-------------------+
-                    |                   |                   |
-                    +-------------------+-------------------+
-                                        |
-                                        v
-                                GROQ CHAT COMPLETIONS
-                                        |
-                                        v
-                              FINAL ANSWER + DEBUG TRACE
+                    |
+                    v
+              ACTION PROPOSAL -> RISK POLICY
+                    |                 |
+              LOW / READ-ONLY   CONSEQUENTIAL
+                    |                 |
+                    |          PERSISTED APPROVAL GATE
+                    |        approve / edit / deny / expire
+                    +-----------------+
+                                      |
+                                      v
+                          PERMISSION + VERSION RECHECK
+                                      |
+                                      v
+                             TOOL + RECEIPT + AUDIT
+                                      |
+                                      v
+                          PLAN UPDATE / REPLAN / FINISH
 ```
 
 ## The Boundaries That Matter
@@ -65,6 +77,7 @@ the limitation of the previous stage becomes clear.
 | Tools | What action or fresh lookup should be performed? | One controlled execution |
 | Agent state | What is happening during this request? | One bounded agent run |
 | Plan state | What tasks, dependencies, outputs, and revisions exist for this complex goal? | One bounded planned run |
+| Approval state | Which exact consequential action/version was reviewed and what happened? | SQLite across UI reruns and restarts |
 | LLM | What should be generated or selected next? | Stateless API call unless context is supplied |
 
 Keeping these inputs separate makes behavior easier to secure, test, and debug.
@@ -717,15 +730,127 @@ agent/planned_agent.py        Application-to-planning-runtime composition root
 docs/STAGE7_PLANNER.md        Deep architecture and testing guide
 ```
 
-### Limitation And Next Evolution
+### Limitation Revealed
 
-Stage 7 V1 is process-local and sequential. It deliberately does not add multi-agent
-delegation, distributed workflow workers, arbitrary code execution, or durable workflow
-resumption. Those require demonstrated product and reliability needs.
+Stage 7 could execute a validated plan but had no first-class distinction between drafting
+content and causing an external side effect. A safe agent must be interruptible before
+consequential work. That leads to Stage 8.
 
 ---
 
-## Project Structure After Stage 7
+## Stage 8: Human-in-the-Loop and Safe Execution
+
+### Goal
+
+Let the agent propose consequential work while keeping authorization and execution under
+runtime and user control.
+
+```text
+planner task
+-> tool contract and argument validation
+-> deterministic risk engine
+-> frozen action proposal
+-> approval gate when required
+-> approve / edit / deny / cancel / expire
+-> permission and exact-version recheck
+-> tool execution
+-> receipt + audit + plan update
+```
+
+This is not a generic confirmation dialog. Human approval is persisted workflow state. The
+plan pauses at `WAITING_FOR_APPROVAL`, survives Streamlit reruns or an app restart, and resumes
+from the same action/version after a decision.
+
+### Risk and Side Effects
+
+Tools declare `risk_level`, `side_effect`, `supports_preview`, and
+`requires_confirmation`. `RiskEngine` then evaluates both metadata and arguments. For
+example, external communication to a large recipient list escalates beyond a single-recipient
+message.
+
+```text
+calculator / weather / search -> LOW, none or read-only -> automatic
+draft email                  -> no side effect          -> automatic
+email.send_mock              -> external communication -> approval
+files.delete_mock            -> destructive            -> approval
+```
+
+The model's risk opinion is never authoritative. Stage 8 uses deterministic runtime rules.
+The email and deletion tools are simulations: they teach the boundary without sending or
+deleting anything real.
+
+### Authentication, Permission, and Approval
+
+```text
+Authentication = who is the user?
+Permission     = may this user/session invoke this capability?
+Approval       = does the user authorize this exact action/version now?
+```
+
+Approval never overrides permission. `ToolManager` rechecks enabled state, session
+permission, schema, tool version, action version, canonical argument digest, and exact
+payload immediately before execution.
+
+### Preview, Editing, and Versioning
+
+The UI preview is derived from the same structured proposal the executor will use. Email
+shows To, Subject, and Body; mock deletion shows exact paths and count.
+
+Editing invalidates the old approval, creates proposal version `N + 1`, reassesses risk, and
+requires another decision. `TaskRunner` executes arguments from the durable approved proposal,
+not mutable planner state, so an approval for A cannot silently execute B.
+
+### Expiry, Receipts, and Audit
+
+Approvals expire after `APPROVAL_TIMEOUT_SECONDS`. Denied, cancelled, expired, missing,
+mismatched, or unavailable approval state fails closed before the tool runs.
+
+Each action version has one local idempotency key. A process-wide execution gate covers
+receipt lookup, the simulated side effect, and receipt persistence, preventing duplicate
+execution inside this Streamlit process. The receipt distinguishes approved, attempted,
+completed, and failed actions. Audit events reconstruct proposal, risk, decision, version,
+time, and outcome without copying prompt or action content into audit metadata.
+
+### How To Verify The Concept
+
+1. Ask `What is 25 * 17?` and confirm no approval is requested.
+2. Ask `Draft an email to John about the project update.` Confirm a draft is produced only.
+3. Ask `Send a simulated project update to john@example.com with subject Weekly Update and body The build is ready.`
+4. Confirm the plan pauses with zero tool attempts and shows a meaningful high-risk preview.
+5. Edit the proposal and confirm the version increments and approval is required again.
+6. Approve and confirm the mock result, receipt ID, completed task, and audit trail.
+7. Repeat with Deny and Cancel; verify neither creates a receipt.
+8. Disable side-effect permission and verify approval cannot override authorization.
+9. Restart the app while approval is pending and verify the same workflow returns.
+10. Run `python -m pytest -q test_human_approval.py` for all Stage 8 boundary tests.
+
+### Main Files
+
+```text
+approval/models.py             Risk, action, approval, receipt, and audit contracts
+approval/risk_engine.py        Deterministic tool-plus-argument classification
+approval/policy.py             Configurable approval requirement boundary
+approval/service.py            Approval lifecycle, expiry, versions, receipts
+approval/repository.py         SQLite approval and workflow persistence
+approval/audit.py              Sensitive-data-minimizing audit events
+approval/gate.py               Executor-facing gate result
+planner/serialization.py       Durable full PlanState representation
+tools/email/tool.py            Safe external-communication simulation
+tools/files/tool.py            Safe destructive-action simulation
+test_human_approval.py         Stage 8 lifecycle, security, and integration tests
+docs/STAGE8_HUMAN_APPROVAL.md  Deep architecture and verification guide
+```
+
+### Current Limitation
+
+Stage 8 remains a local single-process learning system. The configured user ID is not real
+authentication, the process lock is not distributed idempotency, and the risk rules are not
+universal. Production evolution requires authenticated identity, server-side RBAC/ABAC,
+resource ownership, provider idempotency, transactional workers, and measured policy quality.
+
+---
+
+## Project Structure After Stage 8
 
 ```text
 app.py                         Streamlit UI and workflow coordination
@@ -734,6 +859,7 @@ config.py                      Environment and application configuration
 agent/                         Bounded agent state, decisions, loop, routing
 planner/                       Plan contracts, validation, DAG, scheduling, replanning
 executor/                      Capability execution and retry policy
+approval/                      Risk, approval lifecycle, SQLite state, receipts, audit
 llm/groq_client.py             Raw Groq HTTP/SSE client and rate-limit handling
 prompts/                       System, agent, RAG grounding prompts
 
@@ -752,7 +878,7 @@ rag/                           PDF ingestion, embeddings, retrieval, context
 documents/sample/              Controlled PDFs for testing
 documents/raw/                 Uploaded PDFs, ignored by Git
 vector_store/                  Generated RAG vectors, ignored by Git
-docs/                          Stage 5, Stage 6, and Stage 7 deep documentation
+docs/                          Stage 5 through Stage 8 deep documentation
 
 test_memory.py                 Stage 2 tests
 test_agent.py                  Stage 3/4/5/6 agent tests
@@ -761,6 +887,7 @@ test_rag.py                    Stage 5 tests
 test_long_term_memory.py       Stage 6 tests
 test_llm.py                    Groq retry/gate/redaction tests
 test_planner.py                Stage 7 planner, DAG, executor, and lifecycle tests
+test_human_approval.py         Stage 8 risk, approval, pause/resume, and receipt tests
 ```
 
 ## Setup
@@ -789,6 +916,8 @@ GROQ_*                Model, output, timeout, and bounded 429 retry settings
 CHAT_HISTORY_*        Stage 2 persistence and context window
 MAX_AGENT_ITERATIONS  Stage 3 loop limit
 PLANNER_*             Stage 7 plan size, revisions, execution, repair, and retry limits
+APPROVAL_*            Stage 8 SQLite state and per-action confirmation timeout
+SIDE_EFFECT_*         Stage 8 local session capability permission
 RAG_*                 Stage 5 documents, embeddings, chunks, ranking, context
 LONG_TERM_MEMORY_*    Stage 6 database, identity, retrieval, and budget
 ```
@@ -834,7 +963,7 @@ python -m pytest -q
 Current verified result:
 
 ```text
-55 passed
+77 passed
 ```
 
 There is one harmless Pytest collection warning because the Stage 5 test embedding helper
@@ -864,6 +993,10 @@ PDF parse -> chunks -> embeddings -> similarity -> selected evidence -> answer
 
 Memory failure:
 extraction -> validation -> policy -> SQLite -> scope filter -> ranking -> context budget
+
+Approval failure:
+tool metadata -> arguments -> risk -> frozen version -> user decision -> permission recheck
+-> exact digest -> receipt -> audit -> plan resume
 ```
 
 ## Production Evolution
@@ -881,6 +1014,9 @@ Stage 5-6 knowledge and personalization
 Stage 7 complex goal execution
     Validated DAG + bounded executor + goal evaluator
 
+Stage 8 consequential action control
+    Deterministic risk + per-action approval + durable pause/resume + receipts
+
 Hosted production
     Web API + authentication + PostgreSQL + background jobs + observability
 
@@ -896,3 +1032,4 @@ measured problem requires it, not because the technology is popular.
 - [Stage 5 RAG architecture](docs/STAGE5_RAG.md)
 - [Stage 6 long-term memory architecture](docs/STAGE6_MEMORY.md)
 - [Stage 7 planner and executor architecture](docs/STAGE7_PLANNER.md)
+- [Stage 8 human approval and safe execution](docs/STAGE8_HUMAN_APPROVAL.md)

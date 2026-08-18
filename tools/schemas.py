@@ -50,5 +50,16 @@ def _validate_value(key: str, value: Any, field_schema: dict[str, Any]) -> Any:
         if not isinstance(value, int) or isinstance(value, bool):
             raise SchemaValidationError(f"{key} must be an integer")
         return value
+    if expected_type == "array":
+        if not isinstance(value, list):
+            raise SchemaValidationError(f"{key} must be an array")
+        minimum = int(field_schema.get("minItems", 0))
+        if len(value) < minimum:
+            raise SchemaValidationError(f"{key} must contain at least {minimum} item(s)")
+        item_schema = field_schema.get("items", {})
+        return [
+            _validate_value(f"{key}[{index}]", item, item_schema)
+            for index, item in enumerate(value)
+        ]
 
     raise SchemaValidationError(f"{key} uses unsupported schema type: {expected_type}")

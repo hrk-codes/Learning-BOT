@@ -37,6 +37,9 @@ class AppConfig:
     planner_max_execution_steps: int
     planner_max_task_retries: int
     planner_max_repair_attempts: int
+    approval_db_path: Path
+    approval_timeout_seconds: int
+    side_effect_permission_enabled: bool
     rag_documents_path: Path
     rag_vector_store_path: Path
     rag_embedding_model: str
@@ -66,6 +69,10 @@ def get_config() -> AppConfig:
     )
     if not long_term_memory_db_path.is_absolute():
         long_term_memory_db_path = PROJECT_ROOT / long_term_memory_db_path
+
+    approval_db_path = Path(os.getenv("APPROVAL_DB_PATH", "approval/approvals.db"))
+    if not approval_db_path.is_absolute():
+        approval_db_path = PROJECT_ROOT / approval_db_path
 
     return AppConfig(
         groq_api_key=os.getenv("GROQ_API_KEY"),
@@ -106,6 +113,11 @@ def get_config() -> AppConfig:
         ),
         planner_max_repair_attempts=int(
             os.getenv("PLANNER_MAX_REPAIR_ATTEMPTS", "1")
+        ),
+        approval_db_path=approval_db_path,
+        approval_timeout_seconds=int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300")),
+        side_effect_permission_enabled=_read_bool(
+            "SIDE_EFFECT_PERMISSION_ENABLED", True
         ),
         rag_documents_path=rag_documents_path,
         rag_vector_store_path=rag_vector_store_path,

@@ -1,11 +1,18 @@
 import logging
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
 
 from agent.agent import run_agent
 from agent.planned_agent import run_planned_agent
+from approval.models import ApprovalStatus, parse_timestamp
+from approval.policy import ApprovalPolicy
+from approval.repository import ApprovalRepositoryError, SQLiteApprovalRepository
+from approval.risk_engine import RiskEngine
+from approval.service import ApprovalService, ApprovalServiceError
 from config import AppConfig, get_config
 from llm.groq_client import GroqClientError
 from memory.chat_memory import ChatMemory
@@ -59,14 +66,15 @@ def build_rag_pipeline(
 
 def main() -> None:
     config = get_config()
-    st.set_page_config(page_title="Stage 7 Planner Agent", page_icon="AI", layout="centered")
-    st.title("Stage 7 Planner and Executor Agent")
+    st.set_page_config(page_title="Stage 8 Safe Agent", page_icon="AI", layout="centered")
+    st.title("Stage 8 Human Approval Agent")
 
     chat_memory = ChatMemory(
         history_path=config.history_path,
         recent_message_limit=config.recent_message_limit,
     )
     tool_registry = build_default_registry()
+    approval_service = _build_approval_service(config, tool_registry)
     rag_pipeline = build_rag_pipeline(
         str(config.rag_documents_path),
         str(config.rag_vector_store_path),
@@ -90,6 +98,10 @@ def main() -> None:
         st.session_state.long_term_memory_enabled = config.long_term_memory_enabled
     if "planner_enabled" not in st.session_state:
         st.session_state.planner_enabled = config.planner_enabled
+    if "side_effect_permission_enabled" not in st.session_state:
+        st.session_state.side_effect_permission_enabled = (
+            config.side_effect_permission_enabled
+        )
 
     memory_service = _build_memory_service(config)
 
@@ -145,6 +157,20 @@ def main() -> None:
             f"{config.planner_max_execution_steps} execution attempts"
         )
 
+        st.header("Human Approval")
+        st.toggle(
+            "Side-effect capability permission",
+            key="side_effect_permission_enabled",
+            help=(
+                "Permission allows this local session to propose side-effecting mock "
+                "tools. Every specific consequential action still requires approval."
+            ),
+        )
+        st.caption(
+            f"Per-action approval expires after {config.approval_timeout_seconds} seconds."
+        )
+        st.caption("Stage 8 side-effect tools are simulations; no real email or deletion occurs.")
+
         st.header("RAG Retrieval")
         rag_top_k = st.slider(
             "Top-k chunks",
@@ -174,7 +200,10 @@ def main() -> None:
             enabled = st.checkbox(
                 tool.name,
                 value=tool.name in st.session_state.enabled_tools,
-                help=f"{tool.description} Permission: {tool.permission}",
+                help=(
+                    f"{tool.description} Permission: {tool.permission}. "
+                    f"Risk: {tool.risk_level.value}. Side effect: {tool.side_effect.value}."
+                ),
             )
             if enabled:
                 st.session_state.enabled_tools.add(tool.name)
@@ -187,6 +216,34 @@ def main() -> None:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
+    conversation_context = chat_memory.get_recent_history(st.session_state.messages)
+    tool_manager = _build_tool_manager(tool_registry)
+    if approval_service is not None:
+        try:
+            waiting_state = approval_service.find_waiting_workflow(
+                user_id=config.long_term_memory_user_id
+            )
+        except ApprovalServiceError as exc:
+            st.error(f"Approval state is unavailable. Consequential actions are blocked: {exc}")
+            waiting_state = None
+        if waiting_state is not None:
+            _handle_waiting_workflow(
+                state=waiting_state,
+                approval_service=approval_service,
+                config=config,
+                chat_memory=chat_memory,
+                memory_service=memory_service,
+                conversation_context=conversation_context,
+                tool_manager=tool_manager,
+                rag_pipeline=rag_pipeline,
+                rag_top_k=rag_top_k,
+                rag_min_score=rag_min_score,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return
 
     user_goal = st.chat_input("Give the agent a goal")
     if not user_goal:
@@ -239,10 +296,6 @@ def main() -> None:
             st.warning(f"Long-term memory is unavailable for this request: {exc}")
 
     conversation_context = chat_memory.get_recent_history(st.session_state.messages)
-    tool_manager = ToolManager(
-        registry=tool_registry,
-        enabled_tools=set(st.session_state.enabled_tools),
-    )
     memory_metrics = _build_memory_metrics(retrieval, memory_context)
     memory_metrics["extraction_candidate_count"] = extraction_count
     planning_decision = PlanningNeedDetector().detect(user_goal)
@@ -278,6 +331,8 @@ def main() -> None:
                     status_callback=lambda state: _update_plan_status(
                         status_placeholder, state
                     ),
+                    approval_service=approval_service,
+                    approval_user_id=config.long_term_memory_user_id,
                 )
                 final_answer = plan_state.final_answer
             else:
@@ -301,7 +356,7 @@ def main() -> None:
                     memory_metrics=memory_metrics,
                 )
                 final_answer = agent_state.final_answer
-        except (GroqClientError, PlannerError) as exc:
+        except (GroqClientError, PlannerError, ApprovalServiceError) as exc:
             st.error(str(exc))
             return
 
@@ -342,8 +397,377 @@ def main() -> None:
 
         _render_rag_debug(agent_state=agent_state, plan_state=plan_state)
 
+        if plan_state is not None and plan_state.status.value == "waiting_for_approval":
+            if approval_service is None:
+                st.error("Approval service is unavailable. The action remains blocked.")
+            else:
+                _render_approval_panel(plan_state, approval_service, config)
+
+    if plan_state is not None and plan_state.status.value == "waiting_for_approval":
+        return
     chat_memory.add_message(st.session_state.messages, "assistant", final_answer)
     chat_memory.save_history(st.session_state.messages)
+
+
+def _build_approval_service(config: AppConfig, tool_registry) -> ApprovalService | None:
+    try:
+        repository = SQLiteApprovalRepository(config.approval_db_path)
+        return ApprovalService(
+            repository=repository,
+            tool_lookup=tool_registry.get_tool,
+            risk_engine=RiskEngine(),
+            policy=ApprovalPolicy(
+                confirmation_timeout_seconds=config.approval_timeout_seconds
+            ),
+        )
+    except ApprovalRepositoryError as exc:
+        st.error(
+            "Approval storage is unavailable. All consequential actions are blocked: "
+            f"{exc}"
+        )
+        return None
+
+
+def _build_tool_manager(tool_registry) -> ToolManager:
+    permissions = {"safe", "read_only_external"}
+    if st.session_state.side_effect_permission_enabled:
+        permissions.add("side_effecting")
+    return ToolManager(
+        registry=tool_registry,
+        enabled_tools=set(st.session_state.enabled_tools),
+        authorized_permissions=permissions,
+    )
+
+
+def _handle_waiting_workflow(
+    *,
+    state: PlanState,
+    approval_service: ApprovalService,
+    config: AppConfig,
+    chat_memory: ChatMemory,
+    memory_service: MemoryService | None,
+    conversation_context: list[dict[str, str]],
+    tool_manager: ToolManager,
+    rag_pipeline: RagPipeline,
+    rag_top_k: int,
+    rag_min_score: float,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> None:
+    task = next(
+        (
+            item
+            for item in state.tasks
+            if item.status.value == "waiting_for_approval"
+        ),
+        None,
+    )
+    if task is None or not task.approval_id:
+        st.error("The persisted workflow has no verifiable approval task. It remains blocked.")
+        return
+    try:
+        request = approval_service.get_approval(task.approval_id)
+    except ApprovalServiceError as exc:
+        st.error(f"Approval cannot be verified. The action remains blocked: {exc}")
+        return
+
+    if request.status == ApprovalStatus.PENDING:
+        _render_plan_execution(state, PlanningNeedDetector().detect(state.goal))
+        _render_approval_panel(state, approval_service, config)
+        return
+
+    _resume_waiting_workflow(
+        state=state,
+        approval_service=approval_service,
+        config=config,
+        chat_memory=chat_memory,
+        memory_service=memory_service,
+        conversation_context=conversation_context,
+        tool_manager=tool_manager,
+        rag_pipeline=rag_pipeline,
+        rag_top_k=rag_top_k,
+        rag_min_score=rag_min_score,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def _resume_waiting_workflow(
+    *,
+    state: PlanState,
+    approval_service: ApprovalService,
+    config: AppConfig,
+    chat_memory: ChatMemory,
+    memory_service: MemoryService | None,
+    conversation_context: list[dict[str, str]],
+    tool_manager: ToolManager,
+    rag_pipeline: RagPipeline,
+    rag_top_k: int,
+    rag_min_score: float,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> None:
+    memory_payload = None
+    if memory_service is not None and memory_service.enabled:
+        try:
+            retrieval = memory_service.search(
+                state.goal,
+                user_id=config.long_term_memory_user_id,
+                project_id=config.long_term_memory_project_id,
+            )
+            memory_payload = memory_service.build_context(retrieval).payload
+        except MemoryServiceError as exc:
+            st.warning(f"Long-term memory is unavailable while resuming: {exc}")
+
+    with st.chat_message("assistant"):
+        status_placeholder = st.empty()
+        try:
+            resumed = run_planned_agent(
+                config=config,
+                goal=state.goal,
+                conversation_context=conversation_context,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tool_manager=tool_manager,
+                rag_pipeline=rag_pipeline,
+                rag_top_k=rag_top_k,
+                rag_min_score=rag_min_score,
+                long_term_memory_context=memory_payload,
+                memory_search_fn=_build_planner_memory_search(
+                    memory_service, config
+                ),
+                status_callback=lambda current: _update_plan_status(
+                    status_placeholder, current
+                ),
+                approval_service=approval_service,
+                approval_user_id=config.long_term_memory_user_id,
+                existing_state=state,
+            )
+        except (GroqClientError, PlannerError, ApprovalServiceError, ValueError) as exc:
+            st.error(f"The workflow could not resume safely: {exc}")
+            return
+        status_placeholder.empty()
+        st.markdown(resumed.final_answer)
+        _render_plan_execution(resumed, PlanningNeedDetector().detect(resumed.goal))
+        if resumed.status.value == "waiting_for_approval":
+            _render_approval_panel(resumed, approval_service, config)
+            return
+
+    chat_memory.add_message(
+        st.session_state.messages, "assistant", resumed.final_answer
+    )
+    chat_memory.save_history(st.session_state.messages)
+
+
+def _render_approval_panel(
+    state: PlanState,
+    approval_service: ApprovalService,
+    config: AppConfig,
+) -> None:
+    task = next(
+        (
+            item
+            for item in state.tasks
+            if item.status.value == "waiting_for_approval"
+        ),
+        None,
+    )
+    if (
+        task is None
+        or task.action_id is None
+        or task.action_version is None
+        or task.approval_id is None
+    ):
+        st.error("The action proposal is incomplete. Execution remains blocked.")
+        return
+    try:
+        proposal = approval_service.get_action(task.action_id, task.action_version)
+        request = approval_service.get_approval(task.approval_id)
+    except ApprovalServiceError as exc:
+        st.error(f"The approval panel cannot verify this action: {exc}")
+        return
+
+    with st.container(border=True):
+        st.subheader("Action Approval")
+        st.warning(
+            f"{proposal.risk_level.value.upper()} risk: {proposal.risk_reason}"
+        )
+        st.write(
+            {
+                "purpose": proposal.purpose,
+                "tool": proposal.tool_name,
+                "side_effect": proposal.side_effect.value,
+                "action_id": proposal.action_id,
+                "version": proposal.version,
+                "status": request.status.value,
+            }
+        )
+        st.markdown(f"**{proposal.preview.get('title', 'Action preview')}**")
+        st.caption(proposal.preview.get("impact", ""))
+        for label, value in proposal.preview.get("fields", {}).items():
+            st.markdown(f"**{label}**")
+            if isinstance(value, list):
+                st.write(value)
+            else:
+                st.write(str(value))
+
+        remaining = max(
+            0,
+            int(
+                (
+                    parse_timestamp(request.expires_at)
+                    - datetime.now(timezone.utc)
+                ).total_seconds()
+            ),
+        )
+        st.caption(f"Approval expires in {remaining // 60}:{remaining % 60:02d}")
+
+        if request.status == ApprovalStatus.PENDING:
+            approve_col, deny_col, cancel_col = st.columns(3)
+            if approve_col.button(
+                "Approve",
+                type="primary",
+                key=f"approve-{request.approval_id}",
+                use_container_width=True,
+            ):
+                try:
+                    approval_service.approve(
+                        request.approval_id,
+                        user_id=config.long_term_memory_user_id,
+                        expected_version=proposal.version,
+                    )
+                    st.rerun()
+                except ApprovalServiceError as exc:
+                    st.error(f"Approval was rejected: {exc}")
+            if deny_col.button(
+                "Deny",
+                key=f"deny-{request.approval_id}",
+                use_container_width=True,
+            ):
+                try:
+                    approval_service.deny(
+                        request.approval_id,
+                        user_id=config.long_term_memory_user_id,
+                        expected_version=proposal.version,
+                    )
+                    st.rerun()
+                except ApprovalServiceError as exc:
+                    st.error(f"Denial was rejected: {exc}")
+            if cancel_col.button(
+                "Cancel",
+                key=f"cancel-{request.approval_id}",
+                use_container_width=True,
+            ):
+                try:
+                    approval_service.cancel(
+                        request.approval_id,
+                        user_id=config.long_term_memory_user_id,
+                        expected_version=proposal.version,
+                    )
+                    st.rerun()
+                except ApprovalServiceError as exc:
+                    st.error(f"Cancellation was rejected: {exc}")
+
+            _render_action_editor(
+                state=state,
+                task=task,
+                proposal=proposal,
+                request=request,
+                approval_service=approval_service,
+                config=config,
+            )
+
+        with st.expander("Approval audit trail"):
+            st.json(
+                [
+                    {
+                        "event": event.event_type,
+                        "action_version": event.action_version,
+                        "approval_id": event.approval_id,
+                        "created_at": event.created_at,
+                        "metadata": event.metadata,
+                    }
+                    for event in approval_service.list_audit(proposal.action_id)
+                ]
+            )
+
+
+def _render_action_editor(
+    *,
+    state: PlanState,
+    task,
+    proposal,
+    request,
+    approval_service: ApprovalService,
+    config: AppConfig,
+) -> None:
+    with st.expander("Edit action before approval"):
+        with st.form(f"edit-action-{request.approval_id}"):
+            if proposal.tool_name == "email.send_mock":
+                edited_arguments = {
+                    "to": st.text_input("To", value=proposal.arguments["to"]),
+                    "subject": st.text_input(
+                        "Subject", value=proposal.arguments["subject"]
+                    ),
+                    "body": st.text_area(
+                        "Body", value=proposal.arguments["body"], height=180
+                    ),
+                }
+            elif proposal.tool_name == "files.delete_mock":
+                paths = st.text_area(
+                    "Mock paths, one per line",
+                    value="\n".join(proposal.arguments["paths"]),
+                    height=140,
+                )
+                edited_arguments = {
+                    "paths": [line.strip() for line in paths.splitlines() if line.strip()]
+                }
+            else:
+                raw_arguments = st.text_area(
+                    "Arguments JSON",
+                    value=json.dumps(proposal.arguments, indent=2),
+                    height=180,
+                )
+                try:
+                    edited_arguments = json.loads(raw_arguments)
+                except json.JSONDecodeError:
+                    edited_arguments = None
+            submitted = st.form_submit_button(
+                "Create revised proposal", use_container_width=True
+            )
+        if submitted:
+            if not isinstance(edited_arguments, dict):
+                st.error("Edited arguments must be a valid JSON object.")
+                return
+            try:
+                new_proposal, new_request = approval_service.edit(
+                    request.approval_id,
+                    user_id=config.long_term_memory_user_id,
+                    expected_version=proposal.version,
+                    arguments=edited_arguments,
+                )
+                task.tool_arguments = dict(new_proposal.arguments)
+                task.action_version = new_proposal.version
+                task.approval_id = new_request.approval_id
+                state.metrics.actions_edited += 1
+                state.record_event(
+                    "ACTION EDITED",
+                    task_id=task.task_id,
+                    metadata={
+                        "action_id": new_proposal.action_id,
+                        "action_version": new_proposal.version,
+                    },
+                )
+                approval_service.save_workflow(
+                    state, user_id=config.long_term_memory_user_id
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"The revised proposal was rejected: {exc}")
 
 
 def _build_planner_memory_search(memory_service, config):

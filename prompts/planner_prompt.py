@@ -38,7 +38,14 @@ Rules:
 - Use a web-search tool only for current, external, or source-specific facts. Stable concepts
   that the LLM can explain do not require web search merely because the user says "research".
 - Use tool only when an available tool is genuinely needed; arguments must match its schema.
+- Tool metadata declares runtime risk and side effects. Consequential tool tasks will pause
+  at a human approval gate. Planning the task does not approve or execute it.
+- A request to draft content can use llm without approval. A request to send, delete, modify,
+  purchase, or otherwise create an external side effect must use the matching tool when one
+  is available; never claim the side effect from an llm task.
 - Use llm to analyze or synthesize supplied outputs, not to invent missing tool or RAG results.
+- When a later tool needs fields from an llm task, make that task return one JSON object under
+  its declared output_key and reference fields as {{output_key.field}} in tool arguments.
 - Independent tasks may have no dependency so the scheduler can identify them together.
 - Never add arbitrary code, shell, filesystem, database, or network execution.
 """.strip()

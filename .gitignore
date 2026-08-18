@@ -8,6 +8,9 @@ memory/history.json
 memory/*.db
 memory/*.db-shm
 memory/*.db-wal
+approval/*.db
+approval/*.db-shm
+approval/*.db-wal
 documents/raw/*
 !documents/raw/.gitkeep
 vector_store/*

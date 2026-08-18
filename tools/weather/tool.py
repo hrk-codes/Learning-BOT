@@ -2,6 +2,7 @@ from typing import Any
 
 import requests
 
+from approval.models import RiskLevel, SideEffectType
 from tools.base import ToolDefinition, ToolResult
 
 
@@ -29,6 +30,8 @@ def build_weather_tool() -> ToolDefinition:
         timeout_seconds=8,
         version="1.0",
         execute=_execute,
+        risk_level=RiskLevel.LOW,
+        side_effect=SideEffectType.READ_ONLY,
     )
 
 

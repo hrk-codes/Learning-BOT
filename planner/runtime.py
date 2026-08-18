@@ -16,6 +16,7 @@ from planner.scheduler import TaskScheduler
 logger = logging.getLogger(__name__)
 StatusCallback = Callable[[PlanState], None]
 CancellationCheck = Callable[[], bool]
+WorkflowPersist = Callable[[PlanState], None]
 
 
 class PlanningRuntime:
@@ -30,6 +31,7 @@ class PlanningRuntime:
         catalog: CapabilityCatalog,
         max_plan_revisions: int,
         active_tools: list[dict[str, Any]],
+        workflow_persist: WorkflowPersist | None = None,
     ) -> None:
         self.planner = planner
         self.scheduler = scheduler
@@ -39,6 +41,7 @@ class PlanningRuntime:
         self.catalog = catalog
         self.max_plan_revisions = max(0, max_plan_revisions)
         self.active_tools = active_tools
+        self.workflow_persist = workflow_persist
 
     def run(
         self,
@@ -59,7 +62,52 @@ class PlanningRuntime:
         )
         state.status = PlanStatus.RUNNING
         state.record_event("PLAN STARTED", metadata={"revision": state.revision})
+        self._persist(state)
         _notify(status_callback, state)
+
+        return self._run_state(
+            state,
+            status_callback=status_callback,
+            cancellation_check=cancellation_check,
+        )
+
+    def resume(
+        self,
+        state: PlanState,
+        *,
+        status_callback: StatusCallback | None = None,
+        cancellation_check: CancellationCheck | None = None,
+    ) -> PlanState:
+        if state.status != PlanStatus.WAITING_FOR_APPROVAL:
+            raise ValueError("Only a workflow waiting for approval can be resumed.")
+        state.status = PlanStatus.RUNNING
+        state.final_answer = ""
+        state.record_event("PLAN RESUMED")
+        self._persist(state)
+        try:
+            return self._run_state(
+                state,
+                status_callback=status_callback,
+                cancellation_check=cancellation_check,
+            )
+        except Exception as exc:
+            # A failed continuation must not leave durable state claiming the
+            # workflow is still running after the request has already ended.
+            state.status = PlanStatus.FAILED
+            state.final_answer = f"Workflow resume failed safely: {exc}"
+            state.completed_at = utc_now_iso()
+            state.record_event("PLAN RESUME FAILED", message=str(exc))
+            self._persist(state)
+            _notify(status_callback, state)
+            raise
+
+    def _run_state(
+        self,
+        state: PlanState,
+        *,
+        status_callback: StatusCallback | None,
+        cancellation_check: CancellationCheck | None,
+    ) -> PlanState:
 
         while state.status == PlanStatus.RUNNING:
             if cancellation_check is not None and cancellation_check():
@@ -68,8 +116,33 @@ class PlanningRuntime:
                 state.final_answer = "Plan execution was cancelled. No new tasks were started."
                 state.completed_at = utc_now_iso()
                 state.record_event("PLAN CANCELLED")
+                self._persist(state)
                 _notify(status_callback, state)
                 break
+
+            waiting_tasks = [
+                task
+                for task in state.tasks
+                if task.status == TaskStatus.WAITING_FOR_APPROVAL
+            ]
+            if waiting_tasks:
+                result = self.executor.execute(waiting_tasks[0], state)
+                self._persist(state)
+                _notify(status_callback, state)
+                if result.status == TaskStatus.WAITING_FOR_APPROVAL:
+                    state.status = PlanStatus.WAITING_FOR_APPROVAL
+                    state.final_answer = (
+                        "Execution is paused at a human approval gate. Review the "
+                        "frozen action proposal before continuing."
+                    )
+                    state.record_event(
+                        "PLAN PAUSED FOR APPROVAL",
+                        task_id=waiting_tasks[0].task_id,
+                    )
+                    self._persist(state)
+                    _notify(status_callback, state)
+                    break
+                continue
 
             self.scheduler.refresh(state, self.catalog)
             ready = self.scheduler.ready_tasks(state)
@@ -79,8 +152,21 @@ class PlanningRuntime:
                 # RUNNING preserves a clean path to safe parallelism later.
                 state.active_task_id = ready[0].task_id
                 _notify(status_callback, state)
-                self.executor.execute(ready[0], state)
+                result = self.executor.execute(ready[0], state)
+                self._persist(state)
                 _notify(status_callback, state)
+                if result.status == TaskStatus.WAITING_FOR_APPROVAL:
+                    state.status = PlanStatus.WAITING_FOR_APPROVAL
+                    state.final_answer = (
+                        "Execution is paused at a human approval gate. Review the "
+                        "frozen action proposal before continuing."
+                    )
+                    state.record_event(
+                        "PLAN PAUSED FOR APPROVAL", task_id=ready[0].task_id
+                    )
+                    self._persist(state)
+                    _notify(status_callback, state)
+                    break
                 continue
 
             state.status = PlanStatus.EVALUATING
@@ -101,6 +187,7 @@ class PlanningRuntime:
                 state.final_answer = _append_sources(evaluation.final_answer, state)
                 state.completed_at = utc_now_iso()
                 state.record_event("PLAN COMPLETED")
+                self._persist(state)
                 _notify(status_callback, state)
                 break
 
@@ -116,9 +203,11 @@ class PlanningRuntime:
                     state.final_answer = f"The plan stopped safely because replanning failed: {exc}"
                     state.completed_at = utc_now_iso()
                     state.record_event("PLAN FAILED", message=str(exc))
+                    self._persist(state)
                     _notify(status_callback, state)
                     break
                 state.status = PlanStatus.RUNNING
+                self._persist(state)
                 _notify(status_callback, state)
                 continue
 
@@ -131,6 +220,7 @@ class PlanningRuntime:
             )
             state.completed_at = utc_now_iso()
             state.record_event("PLAN FAILED", message=evaluation.reason)
+            self._persist(state)
             _notify(status_callback, state)
             break
 
@@ -141,6 +231,10 @@ class PlanningRuntime:
             state.execution_steps,
         )
         return state
+
+    def _persist(self, state: PlanState) -> None:
+        if self.workflow_persist is not None:
+            self.workflow_persist(state)
 
 
 def _notify(callback: StatusCallback | None, state: PlanState) -> None:

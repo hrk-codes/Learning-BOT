@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from approval.service import ApprovalService
 from config import AppConfig
 from executor.executor import TaskExecutor
 from executor.retry_policy import RetryPolicy
@@ -35,6 +36,9 @@ def run_planned_agent(
     memory_search_fn: MemorySearchFn | None,
     status_callback: StatusCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    approval_service: ApprovalService | None = None,
+    approval_user_id: str = "local-user",
+    existing_state: PlanState | None = None,
 ) -> PlanState:
     def planning_llm(messages: list[dict[str, str]]) -> str:
         return complete_chat_completion(
@@ -85,6 +89,8 @@ def run_planned_agent(
         memory_context=long_term_memory_context,
         rag_top_k=rag_top_k,
         rag_min_score=rag_min_score,
+        approval_service=approval_service,
+        approval_user_id=approval_user_id,
     )
     executor = TaskExecutor(
         runner=runner,
@@ -107,7 +113,20 @@ def run_planned_agent(
         catalog=catalog,
         max_plan_revisions=config.planner_max_revisions,
         active_tools=active_tools,
+        workflow_persist=(
+            lambda state: approval_service.save_workflow(
+                state, user_id=approval_user_id
+            )
+            if approval_service is not None
+            else None
+        ),
     )
+    if existing_state is not None:
+        return runtime.resume(
+            existing_state,
+            status_callback=status_callback,
+            cancellation_check=cancellation_check,
+        )
     return runtime.run(
         goal=goal,
         conversation_context=conversation_context,
@@ -116,4 +135,3 @@ def run_planned_agent(
         status_callback=status_callback,
         cancellation_check=cancellation_check,
     )
-

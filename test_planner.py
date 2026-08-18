@@ -19,7 +19,7 @@ from planner.plan_validator import (
     PlanValidationError,
     PlanValidator,
 )
-from planner.planner import Planner
+from planner.planner import Planner, PlannerError
 from planner.planning_need import PlanningNeedDetector
 from planner.replanner import Replanner
 from planner.runtime import PlanningRuntime
@@ -348,8 +348,8 @@ def test_side_effecting_tool_stays_blocked_without_confirmation() -> None:
     executor.execute(task, state)
 
     assert task.status == TaskStatus.FAILED
-    assert task.attempts == 1
-    assert "requires user confirmation" in task.error
+    assert task.attempts == 0
+    assert "require user confirmation" in task.error
 
 
 def test_failed_dependency_blocks_downstream_without_running_it() -> None:
@@ -498,6 +498,55 @@ def test_runtime_cancellation_stops_before_starting_new_work() -> None:
     assert result.status == PlanStatus.CANCELLED
     assert result.tasks[0].status == TaskStatus.CANCELLED
     assert result.tasks[0].attempts == 0
+
+
+def test_replanner_cannot_repeat_completed_approval_bound_action() -> None:
+    completed = make_task(
+        "send_update",
+        capability=TaskCapability.TOOL,
+        output_key="send_receipt",
+        tool_name="email.send_mock",
+        tool_arguments={"to": "jane@example.com"},
+    )
+    completed.status = TaskStatus.COMPLETED
+    completed.action_id = "act_completed"
+    completed.action_version = 2
+    state = PlanState(goal="Send the edited update", tasks=[completed])
+    response = json.dumps(
+        {
+            "assumptions": [],
+            "tasks": [
+                {
+                    "id": "send_update_again",
+                    "description": "Repeat the completed send",
+                    "capability": "tool",
+                    "dependencies": [],
+                    "inputs": ["goal"],
+                    "output_key": "second_receipt",
+                    "tool_name": "email.send_mock",
+                    "tool_arguments": {"to": "jane@example.com"},
+                    "query": None,
+                    "priority": 0,
+                    "required": True,
+                    "max_retries": 0,
+                }
+            ],
+        }
+    )
+    replanner = Replanner(
+        llm_fn=lambda _messages: response,
+        validator=PlanValidator(max_tasks=8, max_task_retries=1),
+        catalog=CapabilityCatalog(tools=frozenset({"email.send_mock"})),
+        max_repair_attempts=0,
+        default_task_retries=0,
+    )
+
+    with pytest.raises(PlannerError, match="completed approval-bound side effect"):
+        replanner.replan(
+            state,
+            reason="evaluator requested duplicate work",
+            active_tools=[],
+        )
 
 
 class FakeRagPipeline:
