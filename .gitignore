@@ -11,6 +11,9 @@ memory/*.db-wal
 approval/*.db
 approval/*.db-shm
 approval/*.db-wal
+graph/*.db
+graph/*.db-shm
+graph/*.db-wal
 documents/raw/*
 !documents/raw/.gitkeep
 vector_store/*

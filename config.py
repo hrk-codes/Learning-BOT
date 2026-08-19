@@ -37,6 +37,8 @@ class AppConfig:
     planner_max_execution_steps: int
     planner_max_task_retries: int
     planner_max_repair_attempts: int
+    langgraph_enabled: bool
+    langgraph_checkpoint_db_path: Path
     approval_db_path: Path
     approval_timeout_seconds: int
     side_effect_permission_enabled: bool
@@ -73,6 +75,12 @@ def get_config() -> AppConfig:
     approval_db_path = Path(os.getenv("APPROVAL_DB_PATH", "approval/approvals.db"))
     if not approval_db_path.is_absolute():
         approval_db_path = PROJECT_ROOT / approval_db_path
+
+    langgraph_checkpoint_db_path = Path(
+        os.getenv("LANGGRAPH_CHECKPOINT_DB_PATH", "graph/checkpoints.db")
+    )
+    if not langgraph_checkpoint_db_path.is_absolute():
+        langgraph_checkpoint_db_path = PROJECT_ROOT / langgraph_checkpoint_db_path
 
     return AppConfig(
         groq_api_key=os.getenv("GROQ_API_KEY"),
@@ -114,6 +122,8 @@ def get_config() -> AppConfig:
         planner_max_repair_attempts=int(
             os.getenv("PLANNER_MAX_REPAIR_ATTEMPTS", "1")
         ),
+        langgraph_enabled=_read_bool("LANGGRAPH_ENABLED", True),
+        langgraph_checkpoint_db_path=langgraph_checkpoint_db_path,
         approval_db_path=approval_db_path,
         approval_timeout_seconds=int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300")),
         side_effect_permission_enabled=_read_bool(

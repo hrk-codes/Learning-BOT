@@ -1,6 +1,8 @@
 import logging
 import json
 import re
+import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,12 +16,13 @@ from approval.repository import ApprovalRepositoryError, SQLiteApprovalRepositor
 from approval.risk_engine import RiskEngine
 from approval.service import ApprovalService, ApprovalServiceError
 from config import AppConfig, get_config
+from graph.runtime import GraphRunResult, LangGraphPlannedAgent
 from llm.groq_client import GroqClientError
 from memory.chat_memory import ChatMemory
 from memory.models import MemoryCandidate, MemoryScope, MemorySource, MemoryType
 from memory.repository import MemoryRepositoryError, SQLiteMemoryRepository
 from memory.service import MemoryService, MemoryServiceError
-from planner.models import PlanState
+from planner.models import PlanState, TaskStatus
 from planner.planner import PlannerError
 from planner.planning_need import PlanningDecision, PlanningNeedDetector
 from rag.embeddings.embedder import SentenceTransformerEmbedder
@@ -66,8 +69,8 @@ def build_rag_pipeline(
 
 def main() -> None:
     config = get_config()
-    st.set_page_config(page_title="Stage 8 Safe Agent", page_icon="AI", layout="centered")
-    st.title("Stage 8 Human Approval Agent")
+    st.set_page_config(page_title="Stage 9 LangGraph Agent", page_icon="AI", layout="centered")
+    st.title("Stage 9 LangGraph Stateful Agent")
 
     chat_memory = ChatMemory(
         history_path=config.history_path,
@@ -102,6 +105,8 @@ def main() -> None:
         st.session_state.side_effect_permission_enabled = (
             config.side_effect_permission_enabled
         )
+    if "langgraph_enabled" not in st.session_state:
+        st.session_state.langgraph_enabled = config.langgraph_enabled
 
     memory_service = _build_memory_service(config)
 
@@ -156,6 +161,18 @@ def main() -> None:
             f"{config.planner_max_revisions} revisions, and "
             f"{config.planner_max_execution_steps} execution attempts"
         )
+
+        st.header("LangGraph Runtime")
+        st.toggle(
+            "Use LangGraph for complex goals",
+            key="langgraph_enabled",
+            help=(
+                "Uses a stateful graph for planned workflows. Simple requests keep "
+                "the direct Stage 6 agent path; the Stage 8 runtime remains available "
+                "as a comparison fallback."
+            ),
+        )
+        st.caption("Local SQLite checkpoints preserve graph state across restarts.")
 
         st.header("Human Approval")
         st.toggle(
@@ -219,6 +236,37 @@ def main() -> None:
 
     conversation_context = chat_memory.get_recent_history(st.session_state.messages)
     tool_manager = _build_tool_manager(tool_registry)
+    graph_runtime = _build_graph_runtime(
+        config=config,
+        conversation_context=conversation_context,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tool_manager=tool_manager,
+        rag_pipeline=rag_pipeline,
+        rag_top_k=rag_top_k,
+        rag_min_score=rag_min_score,
+        long_term_memory_context=None,
+        memory_service=memory_service,
+        approval_service=approval_service,
+    )
+    try:
+        waiting_graph = graph_runtime.find_waiting_run(
+            user_id=config.long_term_memory_user_id
+        )
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        st.error(f"LangGraph checkpoint state is unavailable: {exc}")
+        waiting_graph = None
+    if waiting_graph is not None:
+        _handle_waiting_graph(
+            graph_runtime=graph_runtime,
+            graph_run=waiting_graph,
+            approval_service=approval_service,
+            config=config,
+            chat_memory=chat_memory,
+        )
+        return
+
     if approval_service is not None:
         try:
             waiting_state = approval_service.find_waiting_workflow(
@@ -304,36 +352,63 @@ def main() -> None:
     )
     agent_state = None
     plan_state = None
+    graph_run = None
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
 
         try:
             if use_planner:
-                status_placeholder.info("Creating and validating an execution plan...")
-                plan_state = run_planned_agent(
-                    config=config,
-                    goal=user_goal,
-                    conversation_context=conversation_context,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tool_manager=tool_manager,
-                    rag_pipeline=rag_pipeline,
-                    rag_top_k=rag_top_k,
-                    rag_min_score=rag_min_score,
-                    long_term_memory_context=(
-                        memory_context.payload if memory_context else None
-                    ),
-                    memory_search_fn=_build_planner_memory_search(
-                        memory_service, config
-                    ),
-                    status_callback=lambda state: _update_plan_status(
-                        status_placeholder, state
-                    ),
-                    approval_service=approval_service,
-                    approval_user_id=config.long_term_memory_user_id,
-                )
+                if st.session_state.langgraph_enabled:
+                    status_placeholder.info("Running the Stage 9 stateful execution graph...")
+                    graph_runtime = _build_graph_runtime(
+                        config=config,
+                        conversation_context=conversation_context,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tool_manager=tool_manager,
+                        rag_pipeline=rag_pipeline,
+                        rag_top_k=rag_top_k,
+                        rag_min_score=rag_min_score,
+                        long_term_memory_context=(
+                            memory_context.payload if memory_context else None
+                        ),
+                        memory_service=memory_service,
+                        approval_service=approval_service,
+                    )
+                    graph_run = graph_runtime.start(
+                        goal=user_goal,
+                        conversation_context=conversation_context,
+                        memory_context=(memory_context.payload if memory_context else None),
+                        knowledge_base=rag_pipeline.describe_for_agent(),
+                    )
+                    plan_state = graph_run.plan_state
+                else:
+                    status_placeholder.info("Creating and validating an execution plan...")
+                    plan_state = run_planned_agent(
+                        config=config,
+                        goal=user_goal,
+                        conversation_context=conversation_context,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tool_manager=tool_manager,
+                        rag_pipeline=rag_pipeline,
+                        rag_top_k=rag_top_k,
+                        rag_min_score=rag_min_score,
+                        long_term_memory_context=(
+                            memory_context.payload if memory_context else None
+                        ),
+                        memory_search_fn=_build_planner_memory_search(
+                            memory_service, config
+                        ),
+                        status_callback=lambda state: _update_plan_status(
+                            status_placeholder, state
+                        ),
+                        approval_service=approval_service,
+                        approval_user_id=config.long_term_memory_user_id,
+                    )
                 final_answer = plan_state.final_answer
             else:
                 status_placeholder.info(
@@ -365,6 +440,8 @@ def main() -> None:
 
         if plan_state is not None:
             _render_plan_execution(plan_state, planning_decision)
+            if graph_run is not None:
+                _render_graph_execution(graph_run)
         elif agent_state is not None:
             _render_direct_agent_execution(
                 agent_state,
@@ -400,6 +477,13 @@ def main() -> None:
         if plan_state is not None and plan_state.status.value == "waiting_for_approval":
             if approval_service is None:
                 st.error("Approval service is unavailable. The action remains blocked.")
+            elif graph_run is not None:
+                _render_graph_approval_panel(
+                    graph_runtime=graph_runtime,
+                    graph_run=graph_run,
+                    approval_service=approval_service,
+                    config=config,
+                )
             else:
                 _render_approval_panel(plan_state, approval_service, config)
 
@@ -437,6 +521,161 @@ def _build_tool_manager(tool_registry) -> ToolManager:
         enabled_tools=set(st.session_state.enabled_tools),
         authorized_permissions=permissions,
     )
+
+
+def _build_graph_runtime(
+    *,
+    config: AppConfig,
+    conversation_context: list[dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    tool_manager: ToolManager,
+    rag_pipeline: RagPipeline,
+    rag_top_k: int,
+    rag_min_score: float,
+    long_term_memory_context: dict | None,
+    memory_service: MemoryService | None,
+    approval_service: ApprovalService | None,
+) -> LangGraphPlannedAgent:
+    """Build a fresh graph definition around live services for this Streamlit run.
+
+    The definition is rebuilt safely on a rerun, while graph state is restored from
+    SQLite through the stable thread ID. Runtime services themselves never enter the
+    checkpoint because connections and callable objects are not durable state.
+    """
+
+    return LangGraphPlannedAgent(
+        config=config,
+        conversation_context=conversation_context,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tool_manager=tool_manager,
+        rag_pipeline=rag_pipeline,
+        rag_top_k=rag_top_k,
+        rag_min_score=rag_min_score,
+        long_term_memory_context=long_term_memory_context,
+        memory_search_fn=_build_planner_memory_search(memory_service, config),
+        approval_service=approval_service,
+        approval_user_id=config.long_term_memory_user_id,
+    )
+
+
+def _handle_waiting_graph(
+    *,
+    graph_runtime: LangGraphPlannedAgent,
+    graph_run: GraphRunResult,
+    approval_service: ApprovalService | None,
+    config: AppConfig,
+    chat_memory: ChatMemory,
+) -> None:
+    """Render or resume the exact interrupted graph thread after human review."""
+
+    if approval_service is None:
+        st.error("Approval storage is unavailable. The graph remains safely paused.")
+        return
+    should_resume = (
+        st.session_state.pop("stage9_resume_thread_id", None) == graph_run.thread_id
+    )
+    waiting_task = next(
+        (
+            task
+            for task in graph_run.plan_state.tasks
+            if task.status == TaskStatus.WAITING_FOR_APPROVAL
+        ),
+        None,
+    )
+    if waiting_task and waiting_task.approval_id:
+        try:
+            request = approval_service.get_approval(waiting_task.approval_id)
+            should_resume = should_resume or request.status != ApprovalStatus.PENDING
+        except ApprovalServiceError as exc:
+            st.error(f"Approval state is unavailable. The graph remains paused: {exc}")
+            return
+
+    if should_resume:
+        with st.chat_message("assistant"):
+            status_placeholder = st.empty()
+            status_placeholder.info("Resuming the saved LangGraph execution...")
+            try:
+                graph_run = graph_runtime.resume(graph_run.thread_id)
+            except (GroqClientError, PlannerError, ApprovalServiceError, ValueError) as exc:
+                st.error(f"The graph could not resume safely: {exc}")
+                return
+            status_placeholder.empty()
+            st.markdown(graph_run.plan_state.final_answer)
+            _render_plan_execution(
+                graph_run.plan_state, PlanningNeedDetector().detect(graph_run.plan_state.goal)
+            )
+            _render_graph_execution(graph_run)
+            if graph_run.interrupted:
+                _render_graph_approval_panel(
+                    graph_runtime=graph_runtime,
+                    graph_run=graph_run,
+                    approval_service=approval_service,
+                    config=config,
+                )
+                return
+        chat_memory.add_message(
+            st.session_state.messages, "assistant", graph_run.plan_state.final_answer
+        )
+        chat_memory.save_history(st.session_state.messages)
+        return
+
+    _render_plan_execution(
+        graph_run.plan_state, PlanningNeedDetector().detect(graph_run.plan_state.goal)
+    )
+    _render_graph_execution(graph_run)
+    _render_graph_approval_panel(
+        graph_runtime=graph_runtime,
+        graph_run=graph_run,
+        approval_service=approval_service,
+        config=config,
+    )
+
+
+def _render_graph_approval_panel(
+    *,
+    graph_runtime: LangGraphPlannedAgent,
+    graph_run: GraphRunResult,
+    approval_service: ApprovalService,
+    config: AppConfig,
+) -> None:
+    def queue_resume() -> None:
+        st.session_state.stage9_resume_thread_id = graph_run.thread_id
+
+    _render_approval_panel(
+        graph_run.plan_state,
+        approval_service,
+        config,
+        on_decision=queue_resume,
+        workflow_persist=lambda state: graph_runtime.update_plan_state(
+            graph_run.thread_id, state
+        ),
+    )
+
+
+def _render_graph_execution(graph_run: GraphRunResult) -> None:
+    """Show workflow metadata without revealing prompts, document text, or reasoning."""
+
+    trace = list(graph_run.values.get("node_trace", []))
+    with st.expander("LangGraph Execution", expanded=True):
+        st.write(
+            {
+                "graph_definition": "planner -> router -> execute -> approval/retry -> evaluate -> replan/end",
+                "run_id": graph_run.run_id,
+                "thread_id": graph_run.thread_id,
+                "status": graph_run.plan_state.status.value,
+                "next_nodes": list(graph_run.next_nodes),
+                "interrupted": graph_run.interrupted,
+                "node_transitions": len(trace),
+                "graph_retries": graph_run.values.get("graph_retry_count", 0),
+                "checkpointing": "SQLite local development saver",
+            }
+        )
+        if trace:
+            st.dataframe(trace, use_container_width=True, hide_index=True)
 
 
 def _handle_waiting_workflow(
@@ -567,6 +806,9 @@ def _render_approval_panel(
     state: PlanState,
     approval_service: ApprovalService,
     config: AppConfig,
+    *,
+    on_decision: Callable[[], None] | None = None,
+    workflow_persist: Callable[[PlanState], None] | None = None,
 ) -> None:
     task = next(
         (
@@ -640,6 +882,8 @@ def _render_approval_panel(
                         user_id=config.long_term_memory_user_id,
                         expected_version=proposal.version,
                     )
+                    if on_decision is not None:
+                        on_decision()
                     st.rerun()
                 except ApprovalServiceError as exc:
                     st.error(f"Approval was rejected: {exc}")
@@ -654,6 +898,8 @@ def _render_approval_panel(
                         user_id=config.long_term_memory_user_id,
                         expected_version=proposal.version,
                     )
+                    if on_decision is not None:
+                        on_decision()
                     st.rerun()
                 except ApprovalServiceError as exc:
                     st.error(f"Denial was rejected: {exc}")
@@ -668,6 +914,8 @@ def _render_approval_panel(
                         user_id=config.long_term_memory_user_id,
                         expected_version=proposal.version,
                     )
+                    if on_decision is not None:
+                        on_decision()
                     st.rerun()
                 except ApprovalServiceError as exc:
                     st.error(f"Cancellation was rejected: {exc}")
@@ -679,6 +927,7 @@ def _render_approval_panel(
                 request=request,
                 approval_service=approval_service,
                 config=config,
+                workflow_persist=workflow_persist,
             )
 
         with st.expander("Approval audit trail"):
@@ -704,6 +953,7 @@ def _render_action_editor(
     request,
     approval_service: ApprovalService,
     config: AppConfig,
+    workflow_persist: Callable[[PlanState], None] | None = None,
 ) -> None:
     with st.expander("Edit action before approval"):
         with st.form(f"edit-action-{request.approval_id}"):
@@ -762,9 +1012,12 @@ def _render_action_editor(
                         "action_version": new_proposal.version,
                     },
                 )
-                approval_service.save_workflow(
-                    state, user_id=config.long_term_memory_user_id
-                )
+                if workflow_persist is not None:
+                    workflow_persist(state)
+                else:
+                    approval_service.save_workflow(
+                        state, user_id=config.long_term_memory_user_id
+                    )
                 st.rerun()
             except Exception as exc:
                 st.error(f"The revised proposal was rejected: {exc}")

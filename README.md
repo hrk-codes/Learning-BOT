@@ -1,10 +1,10 @@
-# Learning-BOT: AI Systems Engineering, Stages 1-8
+# Learning-BOT: AI Systems Engineering, Stages 1-9
 
 Learning-BOT is one continuously evolving Streamlit project built to understand AI
 systems from first principles. It began as one raw HTTP request to a Groq LLM and now
 includes conversation history, a bounded agent runtime, controlled tools, document RAG,
-governed long-term memory, validated multi-step planning, and version-locked human approval
-for consequential actions.
+governed long-term memory, validated multi-step planning, version-locked human approval for
+consequential actions, and a durable LangGraph orchestration layer for complex workflows.
 
 The goal is not to collect popular frameworks. Each stage adds one capability only after
 the limitation of the previous stage becomes clear.
@@ -21,6 +21,7 @@ the limitation of the previous stage becomes clear.
 | 6 | Long-term memory | How can the agent retain useful user/project facts safely? | Memory is a governed data system, not a larger transcript. |
 | 7 | Planner and executor | How can the agent decompose and reliably execute complex goals? | Planning describes a DAG; Python validates, schedules, executes, evaluates, and bounds it. |
 | 8 | Human approval and risk control | How can a plan pause safely before a consequential action? | The model proposes; runtime policy validates; the human approves one exact version; the executor records the outcome. |
+| 9 | LangGraph orchestration | How can branching, loops, retries, approvals, and recovery remain visible as workflows grow? | LangGraph coordinates existing services through explicit state, nodes, edges, interrupts, and checkpoints. |
 
 ## Current Architecture
 
@@ -41,7 +42,7 @@ the limitation of the previous stage becomes clear.
                                         v
                                   AGENT RUNTIME
                          simple -> reactive direct path
-                         complex -> validated planner DAG
+                         complex -> LangGraph stateful planner DAG
                                         |
                     v                   v                   v
                 EXECUTOR              RAG              TOOL MANAGER
@@ -64,7 +65,7 @@ the limitation of the previous stage becomes clear.
                              TOOL + RECEIPT + AUDIT
                                       |
                                       v
-                          PLAN UPDATE / REPLAN / FINISH
+                LANGGRAPH STATE / CHECKPOINT / REPLAN / FINISH
 ```
 
 ## The Boundaries That Matter
@@ -850,7 +851,83 @@ resource ownership, provider idempotency, transactional workers, and measured po
 
 ---
 
-## Project Structure After Stage 8
+## Stage 9: LangGraph Stateful Orchestration
+
+### Goal
+
+Make the existing complex-workflow control flow explicit as a stateful graph without
+replacing the planner, executor, RAG pipeline, memory service, tool registry, or approval
+service.
+
+```text
+START -> planner -> task_router -> execute_task
+                                  |        |
+                                  |        +-> approval interrupt -> resume
+                                  +-> retry_task -> execute_task
+                       -> evaluate -> replan -> task_router
+                                   -> finalize -> END
+```
+
+### What Changed
+
+The previous procedural loop taught the problem. Stage 9 maps that implementation to graph
+state, focused node adapters, explicit edges, conditional routing, cyclic retry/replan paths,
+and SQLite checkpoints. The planner still creates a validated DAG; the graph decides which
+orchestration node runs next.
+
+Graph state represents one workflow execution. It is deliberately separate from conversation
+history, long-term memory, and RAG documents. State stores only serializable run facts and a
+serialized `PlanState`; live database connections, clients, tools, and full documents stay in
+their existing runtime services.
+
+### Approval And Recovery
+
+The graph's approval node calls LangGraph `interrupt()` after Stage 8 has prepared a
+version-locked proposal. SQLite checkpoints persist the graph state at that pause. A human
+decision is still made by the existing `ApprovalService`; then the same `thread_id` resumes
+the graph and the exact tool boundary rechecks permission, version, arguments, and receipt
+idempotency.
+
+`thread_id` identifies one durable graph execution. A new ID starts isolated state; reusing an
+existing one restores its checkpoints. This is why an approval pause can survive a Streamlit
+restart in this local app.
+
+### How To Verify The Concept
+
+1. Enable **Use LangGraph for complex goals** in the sidebar.
+2. Ask `Research JSON and XML, compare their tradeoffs for a small web API, and recommend one.`
+3. Open **LangGraph Execution** and inspect the node trace, statuses, next nodes, retries, and
+   thread ID. The trace contains operational metadata only, not model reasoning.
+4. Ask a simple question and confirm the existing direct agent path still runs.
+5. Ask for a simulated email send. Confirm the graph pauses at the Stage 8 approval panel.
+6. Restart Streamlit before approving, then confirm the same graph thread and proposal return.
+7. Approve, deny, or cancel. Confirm the graph resumes the appropriate route without
+   recreating the original plan.
+8. Run `.venv\Scripts\python.exe -m pytest -q test_langgraph.py`.
+
+### Main Files
+
+```text
+graph/state.py              Serializable graph execution contract and trace reducer
+graph/graph.py              StateGraph definition: nodes, edges, loops, and END
+graph/nodes.py              Adapters around planner, executor, approval, and evaluator
+graph/routing.py            Conditional routing decisions
+graph/checkpoints.py        Local SQLite LangGraph persistence
+graph/runtime.py            Run/thread IDs, start, resume, checkpoint lookup
+test_langgraph.py           State, routing, retry, interrupt/restart, isolation tests
+docs/STAGE9_LANGGRAPH.md    Deep architecture, comparison, and verification guide
+```
+
+### Current Limitation
+
+SQLite checkpointing is appropriate for this local single-process learning application, not a
+multi-worker production deployment. LangGraph does not solve retrieval quality, bad node
+boundaries, unsafe side effects, cost control, distributed coordination, authentication, or
+observability by itself. It makes those workflow decisions more visible and testable.
+
+---
+
+## Project Structure After Stage 9
 
 ```text
 app.py                         Streamlit UI and workflow coordination
@@ -860,6 +937,7 @@ agent/                         Bounded agent state, decisions, loop, routing
 planner/                       Plan contracts, validation, DAG, scheduling, replanning
 executor/                      Capability execution and retry policy
 approval/                      Risk, approval lifecycle, SQLite state, receipts, audit
+graph/                         Stage 9 state, nodes, routing, SQLite checkpoints, runtime
 llm/groq_client.py             Raw Groq HTTP/SSE client and rate-limit handling
 prompts/                       System, agent, RAG grounding prompts
 
@@ -878,7 +956,7 @@ rag/                           PDF ingestion, embeddings, retrieval, context
 documents/sample/              Controlled PDFs for testing
 documents/raw/                 Uploaded PDFs, ignored by Git
 vector_store/                  Generated RAG vectors, ignored by Git
-docs/                          Stage 5 through Stage 8 deep documentation
+docs/                          Stage 5 through Stage 9 deep documentation
 
 test_memory.py                 Stage 2 tests
 test_agent.py                  Stage 3/4/5/6 agent tests
@@ -888,6 +966,7 @@ test_long_term_memory.py       Stage 6 tests
 test_llm.py                    Groq retry/gate/redaction tests
 test_planner.py                Stage 7 planner, DAG, executor, and lifecycle tests
 test_human_approval.py         Stage 8 risk, approval, pause/resume, and receipt tests
+test_langgraph.py              Stage 9 graph, loop, interrupt, recovery, isolation tests
 ```
 
 ## Setup
@@ -916,6 +995,7 @@ GROQ_*                Model, output, timeout, and bounded 429 retry settings
 CHAT_HISTORY_*        Stage 2 persistence and context window
 MAX_AGENT_ITERATIONS  Stage 3 loop limit
 PLANNER_*             Stage 7 plan size, revisions, execution, repair, and retry limits
+LANGGRAPH_*           Stage 9 graph runtime and local SQLite checkpoint location
 APPROVAL_*            Stage 8 SQLite state and per-action confirmation timeout
 SIDE_EFFECT_*         Stage 8 local session capability permission
 RAG_*                 Stage 5 documents, embeddings, chunks, ranking, context
@@ -960,15 +1040,11 @@ print API keys, prompts, or private document content.
 python -m pytest -q
 ```
 
-Current verified result:
+Run the full suite after installing dependencies. The focused Stage 9 graph suite is:
 
-```text
-77 passed
+```powershell
+.venv\Scripts\python.exe -m pytest -q test_langgraph.py
 ```
-
-There is one harmless Pytest collection warning because the Stage 5 test embedding helper
-is named `TestEmbedder` while defining a constructor. It does not prevent any test from
-running.
 
 ## Debug From First Principles
 
@@ -997,6 +1073,10 @@ extraction -> validation -> policy -> SQLite -> scope filter -> ranking -> conte
 Approval failure:
 tool metadata -> arguments -> risk -> frozen version -> user decision -> permission recheck
 -> exact digest -> receipt -> audit -> plan resume
+
+Graph failure:
+thread ID -> checkpoint -> current node -> serialized plan state -> conditional route
+-> retry/replan/approval interrupt -> final status
 ```
 
 ## Production Evolution
@@ -1017,6 +1097,9 @@ Stage 7 complex goal execution
 Stage 8 consequential action control
     Deterministic risk + per-action approval + durable pause/resume + receipts
 
+Stage 9 stateful orchestration
+    Explicit graph + conditional routing + loops + interrupt/resume + checkpoints
+
 Hosted production
     Web API + authentication + PostgreSQL + background jobs + observability
 
@@ -1033,3 +1116,4 @@ measured problem requires it, not because the technology is popular.
 - [Stage 6 long-term memory architecture](docs/STAGE6_MEMORY.md)
 - [Stage 7 planner and executor architecture](docs/STAGE7_PLANNER.md)
 - [Stage 8 human approval and safe execution](docs/STAGE8_HUMAN_APPROVAL.md)
+- [Stage 9 LangGraph stateful orchestration](docs/STAGE9_LANGGRAPH.md)

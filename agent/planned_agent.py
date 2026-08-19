@@ -20,10 +20,9 @@ from rag.pipeline import RagPipeline
 from tools.manager import ToolManager
 
 
-def run_planned_agent(
+def build_planning_runtime(
     *,
     config: AppConfig,
-    goal: str,
     conversation_context: list[dict[str, str]],
     model: str,
     temperature: float,
@@ -34,12 +33,17 @@ def run_planned_agent(
     rag_min_score: float,
     long_term_memory_context: dict[str, Any] | None,
     memory_search_fn: MemorySearchFn | None,
-    status_callback: StatusCallback | None = None,
-    cancellation_check: CancellationCheck | None = None,
     approval_service: ApprovalService | None = None,
     approval_user_id: str = "local-user",
-    existing_state: PlanState | None = None,
-) -> PlanState:
+    graph_managed_task_retries: bool = False,
+) -> PlanningRuntime:
+    """Build the Stage 7/8 services without deciding how they are orchestrated.
+
+    The custom runtime still owns its original procedural loop. Stage 9 asks LangGraph
+    to own the transitions instead, so it uses this same factory with task retries
+    surfaced to graph routing rather than hidden inside ``TaskExecutor``.
+    """
+
     def planning_llm(messages: list[dict[str, str]]) -> str:
         return complete_chat_completion(
             config=config,
@@ -94,7 +98,11 @@ def run_planned_agent(
     )
     executor = TaskExecutor(
         runner=runner,
-        retry_policy=RetryPolicy(config.planner_max_task_retries),
+        # Stage 9 uses an explicit retry node. The custom runtime deliberately
+        # retains its original in-executor retry loop for comparison.
+        retry_policy=RetryPolicy(
+            0 if graph_managed_task_retries else config.planner_max_task_retries
+        ),
         max_execution_steps=config.planner_max_execution_steps,
     )
     replanner = Replanner(
@@ -104,7 +112,7 @@ def run_planned_agent(
         max_repair_attempts=config.planner_max_repair_attempts,
         default_task_retries=config.planner_max_task_retries,
     )
-    runtime = PlanningRuntime(
+    return PlanningRuntime(
         planner=planner,
         scheduler=TaskScheduler(),
         executor=executor,
@@ -114,12 +122,47 @@ def run_planned_agent(
         max_plan_revisions=config.planner_max_revisions,
         active_tools=active_tools,
         workflow_persist=(
-            lambda state: approval_service.save_workflow(
-                state, user_id=approval_user_id
-            )
+            lambda state: approval_service.save_workflow(state, user_id=approval_user_id)
             if approval_service is not None
             else None
         ),
+    )
+
+
+def run_planned_agent(
+    *,
+    config: AppConfig,
+    goal: str,
+    conversation_context: list[dict[str, str]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    tool_manager: ToolManager,
+    rag_pipeline: RagPipeline | None,
+    rag_top_k: int,
+    rag_min_score: float,
+    long_term_memory_context: dict[str, Any] | None,
+    memory_search_fn: MemorySearchFn | None,
+    status_callback: StatusCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
+    approval_service: ApprovalService | None = None,
+    approval_user_id: str = "local-user",
+    existing_state: PlanState | None = None,
+) -> PlanState:
+    runtime = build_planning_runtime(
+        config=config,
+        conversation_context=conversation_context,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tool_manager=tool_manager,
+        rag_pipeline=rag_pipeline,
+        rag_top_k=rag_top_k,
+        rag_min_score=rag_min_score,
+        long_term_memory_context=long_term_memory_context,
+        memory_search_fn=memory_search_fn,
+        approval_service=approval_service,
+        approval_user_id=approval_user_id,
     )
     if existing_state is not None:
         return runtime.resume(
