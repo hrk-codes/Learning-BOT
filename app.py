@@ -22,6 +22,7 @@ from memory.chat_memory import ChatMemory
 from memory.models import MemoryCandidate, MemoryScope, MemorySource, MemoryType
 from memory.repository import MemoryRepositoryError, SQLiteMemoryRepository
 from memory.service import MemoryService, MemoryServiceError
+from multi_agent.runtime import MultiAgentRunResult, MultiAgentRuntime
 from planner.models import PlanState, TaskStatus
 from planner.planner import PlannerError
 from planner.planning_need import PlanningDecision, PlanningNeedDetector
@@ -69,8 +70,8 @@ def build_rag_pipeline(
 
 def main() -> None:
     config = get_config()
-    st.set_page_config(page_title="Stage 9 LangGraph Agent", page_icon="AI", layout="centered")
-    st.title("Stage 9 LangGraph Stateful Agent")
+    st.set_page_config(page_title="Stage 10 Multi-Agent System", page_icon="AI", layout="centered")
+    st.title("Stage 10 Multi-Agent System")
 
     chat_memory = ChatMemory(
         history_path=config.history_path,
@@ -107,6 +108,8 @@ def main() -> None:
         )
     if "langgraph_enabled" not in st.session_state:
         st.session_state.langgraph_enabled = config.langgraph_enabled
+    if "multi_agent_enabled" not in st.session_state:
+        st.session_state.multi_agent_enabled = config.multi_agent_enabled
 
     memory_service = _build_memory_service(config)
 
@@ -173,6 +176,22 @@ def main() -> None:
             ),
         )
         st.caption("Local SQLite checkpoints preserve graph state across restarts.")
+
+        st.header("Specialized Team")
+        st.toggle(
+            "Use manager-led multi-agent workflow",
+            key="multi_agent_enabled",
+            help=(
+                "Uses a Stage 10 LangGraph team: manager, researcher, writer, and "
+                "reviewer. Simple requests finish through the manager without extra "
+                "specialist calls."
+            ),
+        )
+        st.caption(
+            f"Up to {config.multi_agent_max_delegations} delegations, "
+            f"{config.multi_agent_max_agent_retries} retry per agent, and "
+            f"{config.multi_agent_max_review_revisions} review revision."
+        )
 
         st.header("Human Approval")
         st.toggle(
@@ -353,12 +372,33 @@ def main() -> None:
     agent_state = None
     plan_state = None
     graph_run = None
+    multi_agent_run = None
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
 
         try:
-            if use_planner:
+            if st.session_state.multi_agent_enabled:
+                status_placeholder.info("Manager is coordinating the Stage 10 specialist team...")
+                multi_agent_runtime = _build_multi_agent_runtime(
+                    config=config,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tool_manager=tool_manager,
+                    rag_pipeline=rag_pipeline,
+                    rag_top_k=rag_top_k,
+                    rag_min_score=rag_min_score,
+                )
+                multi_agent_run = multi_agent_runtime.start(
+                    goal=user_goal,
+                    user_id=config.long_term_memory_user_id,
+                    conversation_context=conversation_context,
+                    memory_context=(memory_context.payload if memory_context else None),
+                    knowledge_base=rag_pipeline.describe_for_agent(),
+                )
+                final_answer = multi_agent_run.final_answer
+            elif use_planner:
                 if st.session_state.langgraph_enabled:
                     status_placeholder.info("Running the Stage 9 stateful execution graph...")
                     graph_runtime = _build_graph_runtime(
@@ -431,14 +471,16 @@ def main() -> None:
                     memory_metrics=memory_metrics,
                 )
                 final_answer = agent_state.final_answer
-        except (GroqClientError, PlannerError, ApprovalServiceError) as exc:
+        except (GroqClientError, PlannerError, ApprovalServiceError, ValueError) as exc:
             st.error(str(exc))
             return
 
         status_placeholder.empty()
         st.markdown(final_answer)
 
-        if plan_state is not None:
+        if multi_agent_run is not None:
+            _render_multi_agent_execution(multi_agent_run)
+        elif plan_state is not None:
             _render_plan_execution(plan_state, planning_decision)
             if graph_run is not None:
                 _render_graph_execution(graph_run)
@@ -562,6 +604,35 @@ def _build_graph_runtime(
     )
 
 
+def _build_multi_agent_runtime(
+    *,
+    config: AppConfig,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    tool_manager: ToolManager,
+    rag_pipeline: RagPipeline,
+    rag_top_k: int,
+    rag_min_score: float,
+) -> MultiAgentRuntime:
+    """Construct Stage 10 around existing capabilities without broadening access.
+
+    The runtime receives the established RAG pipeline and ToolManager. Role-level
+    contracts decide which of those capabilities a specialist can actually use.
+    """
+
+    return MultiAgentRuntime(
+        config=config,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tool_manager=tool_manager,
+        rag_pipeline=rag_pipeline,
+        rag_top_k=rag_top_k,
+        rag_min_score=rag_min_score,
+    )
+
+
 def _handle_waiting_graph(
     *,
     graph_runtime: LangGraphPlannedAgent,
@@ -676,6 +747,47 @@ def _render_graph_execution(graph_run: GraphRunResult) -> None:
         )
         if trace:
             st.dataframe(trace, use_container_width=True, hide_index=True)
+
+
+def _render_multi_agent_execution(run: MultiAgentRunResult) -> None:
+    """Expose observable workflow facts without exposing prompts or hidden reasoning."""
+
+    values = run.values
+    trace = list(values.get("node_trace", []))
+    results = list(values.get("agent_results", []))
+    with st.expander("Stage 10 Team Execution", expanded=True):
+        st.write(
+            {
+                "run_id": run.run_id,
+                "thread_id": run.thread_id,
+                "status": values.get("status"),
+                "delegations": values.get("delegation_count", 0),
+                "review_revisions": values.get("revision_count", 0),
+                "agent_attempts": values.get("agent_attempts", {}),
+                "specialist_calls": len(results),
+            }
+        )
+        if trace:
+            st.caption("Execution trace")
+            st.dataframe(trace, use_container_width=True, hide_index=True)
+        if results:
+            st.caption("Specialist result metadata")
+            st.dataframe(
+                [
+                    {
+                        "agent": item.get("agent_name"),
+                        "task": item.get("task_id"),
+                        "status": item.get("status"),
+                        "duration_seconds": item.get("duration_seconds"),
+                        "rag_used": item.get("metadata", {}).get("rag_used"),
+                        "tools_used": item.get("metadata", {}).get("tools_used"),
+                        "retry_count": item.get("retry_count"),
+                    }
+                    for item in results
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def _handle_waiting_workflow(

@@ -14,6 +14,9 @@ approval/*.db-wal
 graph/*.db
 graph/*.db-shm
 graph/*.db-wal
+multi_agent/*.db
+multi_agent/*.db-shm
+multi_agent/*.db-wal
 documents/raw/*
 !documents/raw/.gitkeep
 vector_store/*

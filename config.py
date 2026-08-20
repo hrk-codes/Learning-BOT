@@ -39,6 +39,13 @@ class AppConfig:
     planner_max_repair_attempts: int
     langgraph_enabled: bool
     langgraph_checkpoint_db_path: Path
+    multi_agent_enabled: bool
+    multi_agent_checkpoint_db_path: Path
+    multi_agent_max_delegations: int
+    multi_agent_max_agent_retries: int
+    multi_agent_max_review_revisions: int
+    multi_agent_timeout_seconds: int
+    multi_agent_output_repair_attempts: int
     approval_db_path: Path
     approval_timeout_seconds: int
     side_effect_permission_enabled: bool
@@ -82,6 +89,12 @@ def get_config() -> AppConfig:
     if not langgraph_checkpoint_db_path.is_absolute():
         langgraph_checkpoint_db_path = PROJECT_ROOT / langgraph_checkpoint_db_path
 
+    multi_agent_checkpoint_db_path = Path(
+        os.getenv("MULTI_AGENT_CHECKPOINT_DB_PATH", "multi_agent/checkpoints.db")
+    )
+    if not multi_agent_checkpoint_db_path.is_absolute():
+        multi_agent_checkpoint_db_path = PROJECT_ROOT / multi_agent_checkpoint_db_path
+
     return AppConfig(
         groq_api_key=os.getenv("GROQ_API_KEY"),
         groq_api_url="https://api.groq.com/openai/v1/chat/completions",
@@ -124,6 +137,17 @@ def get_config() -> AppConfig:
         ),
         langgraph_enabled=_read_bool("LANGGRAPH_ENABLED", True),
         langgraph_checkpoint_db_path=langgraph_checkpoint_db_path,
+        multi_agent_enabled=_read_bool("MULTI_AGENT_ENABLED", True),
+        multi_agent_checkpoint_db_path=multi_agent_checkpoint_db_path,
+        multi_agent_max_delegations=int(os.getenv("MULTI_AGENT_MAX_DELEGATIONS", "8")),
+        multi_agent_max_agent_retries=int(os.getenv("MULTI_AGENT_MAX_AGENT_RETRIES", "1")),
+        multi_agent_max_review_revisions=int(
+            os.getenv("MULTI_AGENT_MAX_REVIEW_REVISIONS", "1")
+        ),
+        multi_agent_timeout_seconds=int(os.getenv("MULTI_AGENT_TIMEOUT_SECONDS", "60")),
+        multi_agent_output_repair_attempts=int(
+            os.getenv("MULTI_AGENT_OUTPUT_REPAIR_ATTEMPTS", "1")
+        ),
         approval_db_path=approval_db_path,
         approval_timeout_seconds=int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300")),
         side_effect_permission_enabled=_read_bool(

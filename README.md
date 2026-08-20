@@ -1,4 +1,4 @@
-# Learning-BOT: AI Systems Engineering, Stages 1-9
+# Learning-BOT: AI Systems Engineering, Stages 1-10
 
 Learning-BOT is one continuously evolving Streamlit project built to understand AI
 systems from first principles. It began as one raw HTTP request to a Groq LLM and now
@@ -22,6 +22,7 @@ the limitation of the previous stage becomes clear.
 | 7 | Planner and executor | How can the agent decompose and reliably execute complex goals? | Planning describes a DAG; Python validates, schedules, executes, evaluates, and bounds it. |
 | 8 | Human approval and risk control | How can a plan pause safely before a consequential action? | The model proposes; runtime policy validates; the human approves one exact version; the executor records the outcome. |
 | 9 | LangGraph orchestration | How can branching, loops, retries, approvals, and recovery remain visible as workflows grow? | LangGraph coordinates existing services through explicit state, nodes, edges, interrupts, and checkpoints. |
+| 10 | Multi-agent system | When does a complex goal benefit from specialist responsibilities? | A manager delegates through explicit contracts; specialists return structured artifacts; more agents must justify their coordination cost. |
 
 ## Current Architecture
 
@@ -42,7 +43,7 @@ the limitation of the previous stage becomes clear.
                                         v
                                   AGENT RUNTIME
                          simple -> reactive direct path
-                         complex -> LangGraph stateful planner DAG
+                         complex -> planner DAG or manager-led specialist graph
                                         |
                     v                   v                   v
                 EXECUTOR              RAG              TOOL MANAGER
@@ -927,7 +928,88 @@ observability by itself. It makes those workflow decisions more visible and test
 
 ---
 
-## Project Structure After Stage 9
+## Stage 10: Manager-Led Multi-Agent System
+
+### Goal
+
+Use a small team when specialization genuinely improves a complex request:
+
+```text
+USER -> MANAGER -> RESEARCHER -> MANAGER -> WRITER -> MANAGER -> REVIEWER
+                                                            ^              |
+                                                            +--- revise ----+
+```
+
+The manager coordinates. It does not become a super-agent that silently researches,
+writes, reviews, and executes every tool itself.
+
+### What Changed
+
+Stage 10 adds one LangGraph with manager, researcher, writer, reviewer, and finalizer
+nodes. The manager has a deliberately limited decision set: `delegate_research`,
+`delegate_writing`, `delegate_review`, `revise`, or `finish`. Its decisions are structured
+contracts, not instructions parsed from free-form agent chat.
+
+Each specialist has an input/output boundary:
+
+```text
+Researcher: task + selected RAG/search evidence -> claims + source IDs + confidence + gaps
+Writer:     task + normalized research + selected style preferences -> draft
+Reviewer:   task + draft + normalized evidence -> approved / revision_required / research_required
+Manager:    goal + structured artifacts + stated limits -> final response
+```
+
+The researcher alone can use Stage 5 RAG and the active read-only `search.web` tool. The
+writer has no `ToolManager` or raw RAG chunks. The reviewer has no tools and returns feedback
+instead of rewriting. Side-effecting tools are never exposed through this Stage 10 workflow,
+so Stage 8 remains the authoritative route for any consequential action.
+
+### Why This Is Not Always Better
+
+For a simple explanation, the manager routes directly to final synthesis. It does not call
+specialists just because they exist. A team adds latency, token cost, result contracts, and
+more failure paths; use it only where research, drafting, and independent review provide
+enough value to justify those costs.
+
+### How To Verify The Concept
+
+1. Enable **Use manager-led multi-agent workflow** in the sidebar.
+2. Ask `Explain HTTP headers in three sentences.` The trace should be `manager -> finalize`.
+3. Ask `Research PostgreSQL vs MySQL using my indexed documents.` The trace should include
+   `researcher`; its metadata shows whether RAG or read-only search was used.
+4. Ask `Research PostgreSQL vs MySQL, write a short report, and verify it carefully.` The
+   trace should show the manager returning after each specialist and a reviewer result.
+5. Open **Stage 10 Team Execution**. Inspect agent, task, status, duration, RAG/tool use,
+   retries, and delegation count. It intentionally does not expose prompts or hidden reasoning.
+6. Disable the Stage 10 toggle and confirm the existing direct/Stage 9 routes still work.
+7. Run `.venv\Scripts\python.exe -m pytest -q test_multi_agent.py`.
+
+### Main Files
+
+```text
+multi_agent/agents/contracts.py  Task, research, writing, review, and manager contracts
+multi_agent/agents/manager.py    Bounded delegation policy and final synthesis
+multi_agent/agents/researcher.py Controlled RAG/read-only-search evidence collection
+multi_agent/agents/writer.py     Evidence-grounded drafting with selected style memory
+multi_agent/agents/reviewer.py   Structured independent quality feedback
+multi_agent/state.py             Serializable controlled shared workflow artifacts
+multi_agent/graph.py             One manager-led LangGraph topology
+multi_agent/runtime.py           Live-service adapter and SQLite checkpoint setup
+test_multi_agent.py              Contract, route, retry, review, and limit tests
+docs/STAGE10_MULTI_AGENT.md      Detailed architecture and learning guide
+```
+
+### Current Limitation
+
+The first team runs sequentially. It is intentionally not a peer-to-peer swarm, distributed
+queue, nested graph hierarchy, or multi-provider system. Independent research tasks could
+later run in parallel, but that would add rate-limit pressure, cost, state merging, and
+conflict-resolution work. Production needs authenticated identities, per-agent budgets,
+durable observability, evaluations, and a distributed persistence strategy.
+
+---
+
+## Project Structure After Stage 10
 
 ```text
 app.py                         Streamlit UI and workflow coordination
@@ -938,6 +1020,7 @@ planner/                       Plan contracts, validation, DAG, scheduling, repl
 executor/                      Capability execution and retry policy
 approval/                      Risk, approval lifecycle, SQLite state, receipts, audit
 graph/                         Stage 9 state, nodes, routing, SQLite checkpoints, runtime
+multi_agent/                   Stage 10 manager, specialist contracts, state, routing, runtime
 llm/groq_client.py             Raw Groq HTTP/SSE client and rate-limit handling
 prompts/                       System, agent, RAG grounding prompts
 
@@ -956,7 +1039,7 @@ rag/                           PDF ingestion, embeddings, retrieval, context
 documents/sample/              Controlled PDFs for testing
 documents/raw/                 Uploaded PDFs, ignored by Git
 vector_store/                  Generated RAG vectors, ignored by Git
-docs/                          Stage 5 through Stage 9 deep documentation
+docs/                          Stage 5 through Stage 10 deep documentation
 
 test_memory.py                 Stage 2 tests
 test_agent.py                  Stage 3/4/5/6 agent tests
@@ -967,6 +1050,7 @@ test_llm.py                    Groq retry/gate/redaction tests
 test_planner.py                Stage 7 planner, DAG, executor, and lifecycle tests
 test_human_approval.py         Stage 8 risk, approval, pause/resume, and receipt tests
 test_langgraph.py              Stage 9 graph, loop, interrupt, recovery, isolation tests
+test_multi_agent.py            Stage 10 delegation, contracts, reviews, retries, isolation tests
 ```
 
 ## Setup
@@ -996,6 +1080,7 @@ CHAT_HISTORY_*        Stage 2 persistence and context window
 MAX_AGENT_ITERATIONS  Stage 3 loop limit
 PLANNER_*             Stage 7 plan size, revisions, execution, repair, and retry limits
 LANGGRAPH_*           Stage 9 graph runtime and local SQLite checkpoint location
+MULTI_AGENT_*         Stage 10 delegation, retry, revision, timeout, and checkpoint limits
 APPROVAL_*            Stage 8 SQLite state and per-action confirmation timeout
 SIDE_EFFECT_*         Stage 8 local session capability permission
 RAG_*                 Stage 5 documents, embeddings, chunks, ranking, context
@@ -1040,10 +1125,11 @@ print API keys, prompts, or private document content.
 python -m pytest -q
 ```
 
-Run the full suite after installing dependencies. The focused Stage 9 graph suite is:
+Run the full suite after installing dependencies. The focused graph suites are:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test_langgraph.py
+.venv\Scripts\python.exe -m pytest -q test_multi_agent.py
 ```
 
 ## Debug From First Principles
@@ -1077,6 +1163,10 @@ tool metadata -> arguments -> risk -> frozen version -> user decision -> permiss
 Graph failure:
 thread ID -> checkpoint -> current node -> serialized plan state -> conditional route
 -> retry/replan/approval interrupt -> final status
+
+Multi-agent failure:
+manager decision -> delegated task contract -> scoped context -> validated specialist result
+-> manager recovery/revision/finish -> delegation and retry limits
 ```
 
 ## Production Evolution
@@ -1100,6 +1190,9 @@ Stage 8 consequential action control
 Stage 9 stateful orchestration
     Explicit graph + conditional routing + loops + interrupt/resume + checkpoints
 
+Stage 10 specialized collaboration
+    Manager-led delegation + structured artifacts + scoped capabilities + review loop
+
 Hosted production
     Web API + authentication + PostgreSQL + background jobs + observability
 
@@ -1117,3 +1210,4 @@ measured problem requires it, not because the technology is popular.
 - [Stage 7 planner and executor architecture](docs/STAGE7_PLANNER.md)
 - [Stage 8 human approval and safe execution](docs/STAGE8_HUMAN_APPROVAL.md)
 - [Stage 9 LangGraph stateful orchestration](docs/STAGE9_LANGGRAPH.md)
+- [Stage 10 multi-agent architecture](docs/STAGE10_MULTI_AGENT.md)
