@@ -15,8 +15,12 @@ class AppConfig:
     groq_api_key: str | None
     groq_api_url: str
     default_model: str
+    groq_fast_model: str
+    groq_final_model: str
     default_temperature: float
     default_max_tokens: int
+    groq_simple_max_tokens: int
+    groq_fast_max_tokens: int
     request_timeout_seconds: int
     rate_limit_max_retries: int
     rate_limit_max_wait_seconds: float
@@ -98,9 +102,18 @@ def get_config() -> AppConfig:
     return AppConfig(
         groq_api_key=os.getenv("GROQ_API_KEY"),
         groq_api_url="https://api.groq.com/openai/v1/chat/completions",
-        default_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        # GROQ_MODEL remains a compatible fallback for an existing Stage 1-10 .env.
+        groq_final_model=os.getenv(
+            "GROQ_FINAL_MODEL", os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        ),
+        default_model=os.getenv(
+            "GROQ_FINAL_MODEL", os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        ),
+        groq_fast_model=os.getenv("GROQ_FAST_MODEL", "openai/gpt-oss-20b"),
         default_temperature=float(os.getenv("GROQ_TEMPERATURE", "0.7")),
         default_max_tokens=int(os.getenv("GROQ_MAX_TOKENS", "1024")),
+        groq_simple_max_tokens=int(os.getenv("GROQ_SIMPLE_MAX_TOKENS", "384")),
+        groq_fast_max_tokens=int(os.getenv("GROQ_FAST_MAX_TOKENS", "512")),
         request_timeout_seconds=int(os.getenv("GROQ_TIMEOUT_SECONDS", "60")),
         rate_limit_max_retries=int(os.getenv("GROQ_RATE_LIMIT_MAX_RETRIES", "2")),
         rate_limit_max_wait_seconds=float(
@@ -123,8 +136,8 @@ def get_config() -> AppConfig:
         max_agent_iterations=int(os.getenv("MAX_AGENT_ITERATIONS", "4")),
         planner_enabled=_read_bool("PLANNER_ENABLED", True),
         planner_temperature=float(os.getenv("PLANNER_TEMPERATURE", "0.1")),
-        planner_min_output_tokens=int(os.getenv("PLANNER_MIN_OUTPUT_TOKENS", "1200")),
-        planner_max_tasks=int(os.getenv("PLANNER_MAX_TASKS", "8")),
+        planner_min_output_tokens=int(os.getenv("PLANNER_MIN_OUTPUT_TOKENS", "640")),
+        planner_max_tasks=int(os.getenv("PLANNER_MAX_TASKS", "5")),
         planner_max_revisions=int(os.getenv("PLANNER_MAX_REVISIONS", "2")),
         planner_max_execution_steps=int(
             os.getenv("PLANNER_MAX_EXECUTION_STEPS", "12")

@@ -9,6 +9,9 @@ consequential actions, and a durable LangGraph orchestration layer for complex w
 The goal is not to collect popular frameworks. Each stage adds one capability only after
 the limitation of the previous stage becomes clear.
 
+The current free-only routing and measurement strategy is documented in
+[Latency Optimization](docs/LATENCY_OPTIMIZATION.md).
+
 ## Learning Journey
 
 | Stage | Capability added | Problem it solves | Main engineering lesson |

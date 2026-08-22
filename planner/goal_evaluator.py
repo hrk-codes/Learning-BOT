@@ -20,7 +20,7 @@ failed assumptions, and requested deliverables. Return only JSON:
 {
   "goal_satisfied": true,
   "reason": "short evaluation",
-  "final_answer": "complete user-facing answer grounded in the supplied outputs",
+  "final_answer": "a short provisional answer grounded in the supplied outputs",
   "replan_needed": false,
   "missing": []
 }
@@ -34,8 +34,9 @@ repeat of an approval-bound side effect that already completed successfully.
 
 
 class GoalEvaluator:
-    def __init__(self, llm_fn: LLMFn) -> None:
+    def __init__(self, llm_fn: LLMFn, final_synthesis_llm_fn: LLMFn | None = None) -> None:
         self.llm_fn = llm_fn
+        self.final_synthesis_llm_fn = final_synthesis_llm_fn
 
     def evaluate(self, state: PlanState) -> GoalEvaluation:
         started = time.perf_counter()
@@ -100,6 +101,33 @@ class GoalEvaluator:
                 replan_needed=True,
                 missing=tuple(objective_gaps),
             )
+        elif evaluation.goal_satisfied and self.final_synthesis_llm_fn is not None:
+            # The fast model makes the bounded completion decision. Only after that
+            # decision is proven safe do we spend one final-model call on wording.
+            final_answer = self.final_synthesis_llm_fn(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write the final user-facing answer from verified workflow outputs. "
+                            "Do not invent facts, tool results, documents, or actions. "
+                            "Be concise and answer the original goal directly."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=True, default=str)[:30000],
+                    },
+                ]
+            ).strip()
+            if final_answer:
+                evaluation = GoalEvaluation(
+                    goal_satisfied=evaluation.goal_satisfied,
+                    reason=evaluation.reason,
+                    final_answer=final_answer,
+                    replan_needed=evaluation.replan_needed,
+                    missing=evaluation.missing,
+                )
         logger.info(
             "GOAL EVALUATED satisfied=%s replan_needed=%s incomplete_count=%s",
             evaluation.goal_satisfied,

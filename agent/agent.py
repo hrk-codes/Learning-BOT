@@ -1,7 +1,7 @@
 from config import AppConfig
 from agent.agent_loop import run_agent_loop
 from agent.agent_state import AgentState
-from llm.groq_client import complete_chat_completion
+from llm.groq_client import MetricsCallback, complete_chat_completion
 from tools.manager import ToolManager
 from rag.pipeline import RagPipeline
 
@@ -19,6 +19,7 @@ def run_agent(
     rag_min_score: float = 0.25,
     long_term_memory_context: dict | None = None,
     memory_metrics: dict | None = None,
+    latency_callback: MetricsCallback | None = None,
 ) -> AgentState:
     def ask_llm(messages: list[dict[str, str]]) -> str:
         return complete_chat_completion(
@@ -27,6 +28,7 @@ def run_agent(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            on_metrics=latency_callback,
         )
 
     return run_agent_loop(

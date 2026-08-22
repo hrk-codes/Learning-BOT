@@ -5,6 +5,8 @@ import threading
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable
 
 import requests
 
@@ -14,6 +16,34 @@ from config import AppConfig
 logger = logging.getLogger(__name__)
 _REQUEST_GATE = threading.Lock()
 _GROQ_KEY_PATTERN = re.compile(r"gsk_[A-Za-z0-9]+")
+MetricsCallback = Callable[["LatencyMetrics"], None]
+
+
+@dataclass(frozen=True)
+class LatencyMetrics:
+    """Operational request data that is safe to log or show in the local UI."""
+
+    model: str
+    input_message_count: int
+    max_tokens: int
+    request_gate_wait_seconds: float
+    time_to_first_token_seconds: float | None
+    total_seconds: float
+    status_code: int | None
+    retry_count: int
+    provider_usage: dict[str, int] = field(default_factory=dict)
+    failure_type: str | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        values = asdict(self)
+        for name in (
+            "request_gate_wait_seconds",
+            "time_to_first_token_seconds",
+            "total_seconds",
+        ):
+            if values[name] is not None:
+                values[name] = round(values[name], 3)
+        return values
 
 
 class GroqClientError(Exception):
@@ -26,8 +56,23 @@ def stream_chat_completion(
     model: str,
     temperature: float,
     max_tokens: int,
+    on_metrics: MetricsCallback | None = None,
 ) -> Generator[str, None, None]:
     if not config.groq_api_key:
+        metrics = LatencyMetrics(
+            model=model,
+            input_message_count=len(messages),
+            max_tokens=max_tokens,
+            request_gate_wait_seconds=0.0,
+            time_to_first_token_seconds=None,
+            total_seconds=0.0,
+            status_code=None,
+            retry_count=0,
+            failure_type="MissingApiKey",
+        )
+        logger.info("GROQ LATENCY %s", metrics.public_dict())
+        if on_metrics is not None:
+            on_metrics(metrics)
         raise GroqClientError(
             "Missing GROQ_API_KEY. Create a .env file or set the environment variable before starting the app."
         )
@@ -42,6 +87,9 @@ def stream_chat_completion(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": True,
+        # Groq sends a final usage-only event when this is supported. It lets the
+        # app display cache usage without ever retaining prompt or response text.
+        "stream_options": {"include_usage": True},
     }
     if model.startswith("openai/gpt-oss-"):
         # Keep reasoning useful without letting it consume the decision budget.
@@ -56,6 +104,12 @@ def stream_chat_completion(
         temperature,
     )
 
+    status_code: int | None = None
+    gate_wait_seconds = 0.0
+    retry_count = 0
+    first_token_seconds: float | None = None
+    provider_usage: dict[str, int] = {}
+    failure_type: str | None = None
     try:
         with _serialized_rate_limited_request(
             url=config.groq_api_url,
@@ -65,6 +119,9 @@ def stream_chat_completion(
             max_retries=config.rate_limit_max_retries,
             max_wait_seconds=config.rate_limit_max_wait_seconds,
         ) as response:
+            status_code = response.status_code
+            gate_wait_seconds = float(getattr(response, "_latency_gate_wait_seconds", 0.0))
+            retry_count = int(getattr(response, "_latency_retry_count", 0))
             if response.status_code >= 400:
                 raise GroqClientError(_format_http_error(response))
 
@@ -87,27 +144,56 @@ def stream_chat_completion(
                 except json.JSONDecodeError as exc:
                     raise GroqClientError("Groq returned a streaming chunk that was not valid JSON.") from exc
 
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                provider_usage.update(_safe_usage(chunk.get("usage")))
+                choices = chunk.get("choices")
+                delta = (
+                    choices[0].get("delta", {})
+                    if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+                    else {}
+                )
                 content = delta.get("content")
                 if content:
                     received_text = True
+                    if first_token_seconds is None:
+                        first_token_seconds = time.perf_counter() - started_at
                     yield content
 
             if not received_text:
                 raise GroqClientError("Groq completed the request but did not return any text.")
 
-            elapsed = time.perf_counter() - started_at
-            logger.info("Groq request succeeded elapsed_seconds=%.2f", elapsed)
+            logger.info("Groq request succeeded elapsed_seconds=%.2f", time.perf_counter() - started_at)
 
     except requests.Timeout as exc:
+        failure_type = type(exc).__name__
         logger.exception("Groq request timed out")
         raise GroqClientError("The Groq request timed out. Try again or lower max tokens.") from exc
     except requests.ConnectionError as exc:
+        failure_type = type(exc).__name__
         logger.exception("Groq connection failed")
         raise GroqClientError("Could not connect to Groq. Check your internet connection and try again.") from exc
     except requests.RequestException as exc:
+        failure_type = type(exc).__name__
         logger.exception("Groq request failed")
         raise GroqClientError("The Groq request failed before a response was completed.") from exc
+    except GroqClientError as exc:
+        failure_type = type(exc).__name__
+        raise
+    finally:
+        metrics = LatencyMetrics(
+            model=model,
+            input_message_count=len(messages),
+            max_tokens=max_tokens,
+            request_gate_wait_seconds=gate_wait_seconds,
+            time_to_first_token_seconds=first_token_seconds,
+            total_seconds=time.perf_counter() - started_at,
+            status_code=status_code,
+            retry_count=retry_count,
+            provider_usage=provider_usage,
+            failure_type=failure_type,
+        )
+        logger.info("GROQ LATENCY %s", metrics.public_dict())
+        if on_metrics is not None:
+            on_metrics(metrics)
 
 
 def complete_chat_completion(
@@ -116,6 +202,7 @@ def complete_chat_completion(
     model: str,
     temperature: float,
     max_tokens: int,
+    on_metrics: MetricsCallback | None = None,
 ) -> str:
     """Collect a streamed response when the caller needs one complete value.
 
@@ -130,6 +217,7 @@ def complete_chat_completion(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            on_metrics=on_metrics,
         )
     )
 
@@ -177,6 +265,7 @@ def _serialized_rate_limited_request(
 ) -> Generator[requests.Response, None, None]:
     # Hold the gate until streaming completes so concurrent Streamlit sessions
     # cannot consume the same organization quota at the same time.
+    gate_started = time.perf_counter()
     with _REQUEST_GATE:
         response = _post_with_rate_limit_retry(
             url=url,
@@ -186,6 +275,9 @@ def _serialized_rate_limited_request(
             max_retries=max_retries,
             max_wait_seconds=max_wait_seconds,
         )
+        # Attach only anonymous timing metadata. The response remains compatible
+        # with the existing context-manager interface and its focused tests.
+        response._latency_gate_wait_seconds = time.perf_counter() - gate_started
         try:
             yield response
         finally:
@@ -225,11 +317,13 @@ def _post_with_rate_limit_retry(
         )
 
         if response.status_code != 429 or retry_count == max_retries:
+            response._latency_retry_count = retry_count
             return response
 
         retry_after = _parse_retry_after(response.headers.get("retry-after"))
         if retry_after is None:
             logger.warning("Groq rate limit response omitted a valid retry-after value")
+            response._latency_retry_count = retry_count
             return response
 
         if cumulative_wait + retry_after > max_wait_seconds:
@@ -240,6 +334,7 @@ def _post_with_rate_limit_retry(
                 cumulative_wait,
                 max_wait_seconds,
             )
+            response._latency_retry_count = retry_count
             return response
 
         logger.warning(
@@ -277,3 +372,25 @@ def _error_details(body: object) -> tuple[str, str, str]:
             message = _GROQ_KEY_PATTERN.sub("[REDACTED]", message)
             return error_type, error_code, message[:500]
     return "unknown", "unknown", "The provider returned an unreadable error response."
+
+
+def _safe_usage(value: object) -> dict[str, int]:
+    """Return only numeric provider counters; never surface request content."""
+
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+    }
+    usage: dict[str, int] = {}
+    for name, raw in value.items():
+        if name in allowed and isinstance(raw, int):
+            usage[name] = raw
+        elif name == "prompt_tokens_details" and isinstance(raw, dict):
+            cached = raw.get("cached_tokens")
+            if isinstance(cached, int):
+                usage["cached_tokens"] = cached
+    return usage

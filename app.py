@@ -17,7 +17,8 @@ from approval.risk_engine import RiskEngine
 from approval.service import ApprovalService, ApprovalServiceError
 from config import AppConfig, get_config
 from graph.runtime import GraphRunResult, LangGraphPlannedAgent
-from llm.groq_client import GroqClientError
+from latency.fast_path import classify_fast_path
+from llm.groq_client import GroqClientError, LatencyMetrics, stream_chat_completion
 from memory.chat_memory import ChatMemory
 from memory.models import MemoryCandidate, MemoryScope, MemorySource, MemoryType
 from memory.repository import MemoryRepositoryError, SQLiteMemoryRepository
@@ -33,6 +34,7 @@ from rag.pipeline import RagPipeline, RagPipelineError
 from rag.storage.vector_store import JsonVectorStore, VectorStoreError
 from tools.factory import build_default_registry
 from tools.manager import ToolManager
+from prompts.system_prompt import SYSTEM_PROMPT
 
 
 logging.basicConfig(
@@ -115,7 +117,8 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Model Settings")
-        model = st.text_input("Model", value=config.default_model)
+        model = st.text_input("Fast workflow model", value=config.groq_fast_model)
+        final_model = st.text_input("Final synthesis model", value=config.groq_final_model)
         temperature = st.slider(
             "Temperature",
             min_value=0.0,
@@ -124,12 +127,27 @@ def main() -> None:
             step=0.1,
         )
         max_tokens = st.slider(
-            "Max tokens",
+            "Final answer max tokens",
             min_value=64,
             max_value=4096,
             value=config.default_max_tokens,
             step=64,
         )
+        with st.expander("Latency Benchmark"):
+            st.caption(
+                "Runs three live provider requests and uses your Groq quota. It does not run tools or side effects."
+            )
+            if st.button("Run three-request benchmark", use_container_width=True):
+                st.session_state.latency_benchmark = _run_latency_benchmark(
+                    config=config,
+                    fast_model=model,
+                    final_model=final_model,
+                    temperature=temperature,
+                    rag_pipeline=rag_pipeline,
+                )
+            benchmark = st.session_state.get("latency_benchmark")
+            if benchmark:
+                st.dataframe(benchmark, use_container_width=True, hide_index=True)
 
         st.divider()
         if config.groq_api_key:
@@ -163,6 +181,10 @@ def main() -> None:
             f"Up to {config.planner_max_tasks} tasks, "
             f"{config.planner_max_revisions} revisions, and "
             f"{config.planner_max_execution_steps} execution attempts"
+        )
+        st.caption(
+            f"Fast direct chat: up to {config.groq_simple_max_tokens} tokens. "
+            f"Fast workflow steps: up to {config.groq_fast_max_tokens} tokens."
         )
 
         st.header("LangGraph Runtime")
@@ -259,8 +281,9 @@ def main() -> None:
         config=config,
         conversation_context=conversation_context,
         model=model,
+        final_model=final_model,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=config.groq_fast_max_tokens,
         tool_manager=tool_manager,
         rag_pipeline=rag_pipeline,
         rag_top_k=rag_top_k,
@@ -268,6 +291,7 @@ def main() -> None:
         long_term_memory_context=None,
         memory_service=memory_service,
         approval_service=approval_service,
+        final_max_tokens=max_tokens,
     )
     try:
         waiting_graph = graph_runtime.find_waiting_run(
@@ -307,8 +331,9 @@ def main() -> None:
                 rag_top_k=rag_top_k,
                 rag_min_score=rag_min_score,
                 model=model,
+                final_model=final_model,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=config.groq_fast_max_tokens,
             )
             return
 
@@ -327,6 +352,39 @@ def main() -> None:
         with st.chat_message("assistant"):
             st.markdown(direct_answer)
         chat_memory.add_message(st.session_state.messages, "assistant", direct_answer)
+        chat_memory.save_history(st.session_state.messages)
+        return
+
+    fast_path = classify_fast_path(user_goal)
+    if fast_path.eligible:
+        latency_metrics: list[LatencyMetrics] = []
+        fast_context = chat_memory.get_recent_history(st.session_state.messages)
+        with st.chat_message("assistant"):
+            status_placeholder = st.empty()
+            response_placeholder = st.empty()
+            parts: list[str] = []
+            try:
+                # Keep the static instruction first, followed by only the recent
+                # chat context. That minimizes input tokens and improves cache reuse.
+                for token in stream_chat_completion(
+                    config=config,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}, *fast_context],
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=config.groq_simple_max_tokens,
+                    on_metrics=latency_metrics.append,
+                ):
+                    parts.append(token)
+                    response_placeholder.markdown("".join(parts) + "▌")
+            except GroqClientError as exc:
+                st.error(str(exc))
+                _render_latency_debug(latency_metrics, route=fast_path.reason)
+                return
+            status_placeholder.empty()
+            final_answer = "".join(parts)
+            response_placeholder.markdown(final_answer)
+            _render_latency_debug(latency_metrics, route=fast_path.reason)
+        chat_memory.add_message(st.session_state.messages, "assistant", final_answer)
         chat_memory.save_history(st.session_state.messages)
         return
 
@@ -373,6 +431,7 @@ def main() -> None:
     plan_state = None
     graph_run = None
     multi_agent_run = None
+    latency_metrics: list[LatencyMetrics] = []
 
     with st.chat_message("assistant"):
         status_placeholder = st.empty()
@@ -383,12 +442,15 @@ def main() -> None:
                 multi_agent_runtime = _build_multi_agent_runtime(
                     config=config,
                     model=model,
+                    final_model=final_model,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=config.groq_fast_max_tokens,
                     tool_manager=tool_manager,
                     rag_pipeline=rag_pipeline,
                     rag_top_k=rag_top_k,
                     rag_min_score=rag_min_score,
+                    latency_callback=latency_metrics.append,
+                    final_max_tokens=max_tokens,
                 )
                 multi_agent_run = multi_agent_runtime.start(
                     goal=user_goal,
@@ -405,8 +467,9 @@ def main() -> None:
                         config=config,
                         conversation_context=conversation_context,
                         model=model,
+                        final_model=final_model,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=config.groq_fast_max_tokens,
                         tool_manager=tool_manager,
                         rag_pipeline=rag_pipeline,
                         rag_top_k=rag_top_k,
@@ -416,6 +479,8 @@ def main() -> None:
                         ),
                         memory_service=memory_service,
                         approval_service=approval_service,
+                        final_max_tokens=max_tokens,
+                        latency_callback=latency_metrics.append,
                     )
                     graph_run = graph_runtime.start(
                         goal=user_goal,
@@ -431,8 +496,10 @@ def main() -> None:
                         goal=user_goal,
                         conversation_context=conversation_context,
                         model=model,
+                        final_model=final_model,
+                        final_max_tokens=max_tokens,
                         temperature=temperature,
-                        max_tokens=max_tokens,
+                        max_tokens=config.groq_fast_max_tokens,
                         tool_manager=tool_manager,
                         rag_pipeline=rag_pipeline,
                         rag_top_k=rag_top_k,
@@ -448,6 +515,7 @@ def main() -> None:
                         ),
                         approval_service=approval_service,
                         approval_user_id=config.long_term_memory_user_id,
+                        latency_callback=latency_metrics.append,
                     )
                 final_answer = plan_state.final_answer
             else:
@@ -460,7 +528,7 @@ def main() -> None:
                     conversation_context=conversation_context,
                     model=model,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=config.groq_fast_max_tokens,
                     tool_manager=tool_manager,
                     rag_pipeline=rag_pipeline,
                     rag_top_k=rag_top_k,
@@ -469,6 +537,7 @@ def main() -> None:
                         memory_context.payload if memory_context else None
                     ),
                     memory_metrics=memory_metrics,
+                    latency_callback=latency_metrics.append,
                 )
                 final_answer = agent_state.final_answer
         except (GroqClientError, PlannerError, ApprovalServiceError, ValueError) as exc:
@@ -515,6 +584,7 @@ def main() -> None:
                 )
 
         _render_rag_debug(agent_state=agent_state, plan_state=plan_state)
+        _render_latency_debug(latency_metrics, route=("complex workflow" if use_planner else "direct agent"))
 
         if plan_state is not None and plan_state.status.value == "waiting_for_approval":
             if approval_service is None:
@@ -565,11 +635,122 @@ def _build_tool_manager(tool_registry) -> ToolManager:
     )
 
 
+def _render_latency_debug(metrics: list[LatencyMetrics], *, route: str) -> None:
+    """Show timing facts only, keeping prompts, memories, and outputs private."""
+
+    with st.expander("Latency Debug"):
+        st.caption(f"Route: {route}. Each row is one Groq request.")
+        if not metrics:
+            st.info("No provider request completed for this response.")
+            return
+        rows = [metric.public_dict() for metric in metrics]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.caption(
+            f"LLM calls: {len(rows)}. First-token time is measured from this app's request start; "
+            "request-gate wait protects the shared rate limit."
+        )
+
+
+def _run_latency_benchmark(
+    *,
+    config: AppConfig,
+    fast_model: str,
+    final_model: str,
+    temperature: float,
+    rag_pipeline: RagPipeline,
+) -> list[dict[str, object]]:
+    """Run small, explicit live samples without invoking tools or agent side effects."""
+
+    cases: list[tuple[str, str, list[dict[str, str]], int]] = [
+        (
+            "simple explanation",
+            fast_model,
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "Explain HTTP headers in three short bullet points."},
+            ],
+            config.groq_simple_max_tokens,
+        ),
+        (
+            "complex synthesis sample",
+            final_model,
+            [
+                {
+                    "role": "system",
+                    "content": "Give a concise, accurate answer based only on the supplied request.",
+                },
+                {
+                    "role": "user",
+                    "content": "Compare JSON and XML for a small API and recommend one.",
+                },
+            ],
+            config.default_max_tokens,
+        ),
+    ]
+    try:
+        retrieval = rag_pipeline.retrieve("Summarize the most relevant indexed document.")
+    except RagPipelineError:
+        retrieval = None
+    if retrieval and retrieval.chunks:
+        context = "\n\n".join(chunk.text for chunk in retrieval.chunks)[:2500]
+        cases.insert(
+            1,
+            (
+                "RAG question",
+                fast_model,
+                [
+                    {
+                        "role": "system",
+                        "content": "Answer only from the supplied document excerpts. Say when evidence is missing.",
+                    },
+                    {"role": "user", "content": f"Document excerpts:\n{context}\n\nSummarize the key point."},
+                ],
+                config.groq_fast_max_tokens,
+            ),
+        )
+    else:
+        cases.insert(1, ("RAG question", fast_model, [], config.groq_fast_max_tokens))
+
+    rows: list[dict[str, object]] = []
+    for name, selected_model, messages, token_cap in cases:
+        if not messages:
+            rows.append({"case": name, "model": selected_model, "status": "skipped: no indexed document"})
+            continue
+        metrics: list[LatencyMetrics] = []
+        try:
+            answer = "".join(
+                stream_chat_completion(
+                    config=config,
+                    messages=messages,
+                    model=selected_model,
+                    temperature=temperature,
+                    max_tokens=token_cap,
+                    on_metrics=metrics.append,
+                )
+            )
+            metric = metrics[-1]
+            rows.append(
+                {
+                    "case": name,
+                    "model": selected_model,
+                    "status": "completed",
+                    "calls": 1,
+                    "first_token_s": metric.public_dict()["time_to_first_token_seconds"],
+                    "total_s": metric.public_dict()["total_seconds"],
+                    "answer_chars": len(answer),
+                }
+            )
+        except GroqClientError as exc:
+            rows.append({"case": name, "model": selected_model, "status": f"failed: {exc}"})
+    return rows
+
+
 def _build_graph_runtime(
     *,
     config: AppConfig,
     conversation_context: list[dict[str, str]],
     model: str,
+    final_model: str,
     temperature: float,
     max_tokens: int,
     tool_manager: ToolManager,
@@ -579,6 +760,8 @@ def _build_graph_runtime(
     long_term_memory_context: dict | None,
     memory_service: MemoryService | None,
     approval_service: ApprovalService | None,
+    final_max_tokens: int | None = None,
+    latency_callback: Callable[[LatencyMetrics], None] | None = None,
 ) -> LangGraphPlannedAgent:
     """Build a fresh graph definition around live services for this Streamlit run.
 
@@ -591,6 +774,8 @@ def _build_graph_runtime(
         config=config,
         conversation_context=conversation_context,
         model=model,
+        final_model=final_model,
+        final_max_tokens=final_max_tokens,
         temperature=temperature,
         max_tokens=max_tokens,
         tool_manager=tool_manager,
@@ -601,6 +786,7 @@ def _build_graph_runtime(
         memory_search_fn=_build_planner_memory_search(memory_service, config),
         approval_service=approval_service,
         approval_user_id=config.long_term_memory_user_id,
+        latency_callback=latency_callback,
     )
 
 
@@ -608,12 +794,15 @@ def _build_multi_agent_runtime(
     *,
     config: AppConfig,
     model: str,
+    final_model: str,
     temperature: float,
     max_tokens: int,
     tool_manager: ToolManager,
     rag_pipeline: RagPipeline,
     rag_top_k: int,
     rag_min_score: float,
+    latency_callback: Callable[[LatencyMetrics], None] | None = None,
+    final_max_tokens: int | None = None,
 ) -> MultiAgentRuntime:
     """Construct Stage 10 around existing capabilities without broadening access.
 
@@ -624,12 +813,15 @@ def _build_multi_agent_runtime(
     return MultiAgentRuntime(
         config=config,
         model=model,
+        final_model=final_model,
+        final_max_tokens=final_max_tokens,
         temperature=temperature,
         max_tokens=max_tokens,
         tool_manager=tool_manager,
         rag_pipeline=rag_pipeline,
         rag_top_k=rag_top_k,
         rag_min_score=rag_min_score,
+        latency_callback=latency_callback,
     )
 
 
@@ -803,6 +995,7 @@ def _handle_waiting_workflow(
     rag_top_k: int,
     rag_min_score: float,
     model: str,
+    final_model: str,
     temperature: float,
     max_tokens: int,
 ) -> None:
@@ -840,6 +1033,7 @@ def _handle_waiting_workflow(
         rag_top_k=rag_top_k,
         rag_min_score=rag_min_score,
         model=model,
+        final_model=final_model,
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -858,6 +1052,7 @@ def _resume_waiting_workflow(
     rag_top_k: int,
     rag_min_score: float,
     model: str,
+    final_model: str,
     temperature: float,
     max_tokens: int,
 ) -> None:
@@ -881,6 +1076,7 @@ def _resume_waiting_workflow(
                 goal=state.goal,
                 conversation_context=conversation_context,
                 model=model,
+                final_model=final_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tool_manager=tool_manager,

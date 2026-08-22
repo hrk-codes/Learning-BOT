@@ -14,6 +14,7 @@ from graph.checkpoints import build_sqlite_checkpointer
 from graph.graph import build_agent_graph
 from graph.nodes import GraphDependencies
 from graph.state import GraphAgentState
+from llm.groq_client import MetricsCallback
 from planner.models import PlanState
 from planner.serialization import plan_state_from_dict, plan_state_to_dict
 from rag.pipeline import RagPipeline
@@ -49,6 +50,9 @@ class LangGraphPlannedAgent:
         memory_search_fn,
         approval_service: ApprovalService | None,
         approval_user_id: str,
+        final_model: str | None = None,
+        final_max_tokens: int | None = None,
+        latency_callback: MetricsCallback | None = None,
     ) -> None:
         self.config = config
         self.approval_user_id = approval_user_id
@@ -64,9 +68,12 @@ class LangGraphPlannedAgent:
             rag_min_score=rag_min_score,
             long_term_memory_context=long_term_memory_context,
             memory_search_fn=memory_search_fn,
+            final_model=final_model,
+            final_max_tokens=final_max_tokens,
             approval_service=approval_service,
             approval_user_id=approval_user_id,
             graph_managed_task_retries=True,
+            latency_callback=latency_callback,
         )
         self.checkpointer = build_sqlite_checkpointer(config.langgraph_checkpoint_db_path)
         self.graph = build_agent_graph(
@@ -144,7 +151,12 @@ class LangGraphPlannedAgent:
         """Find the newest paused approval run for one local user identity."""
 
         seen_threads: set[str] = set()
-        for checkpoint in self.checkpointer.list(None):
+        # Materialize the scan before asking the graph for an individual state.
+        # SqliteSaver.list() keeps a database cursor open while it yields rows; a
+        # nested get_state() on that same connection can wait indefinitely, which
+        # leaves Streamlit stuck before it reaches the chat input.
+        checkpoints = list(self.checkpointer.list(None))
+        for checkpoint in checkpoints:
             configurable = checkpoint.config.get("configurable", {})
             thread_id = configurable.get("thread_id")
             if not isinstance(thread_id, str) or thread_id in seen_threads:

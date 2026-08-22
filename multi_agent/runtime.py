@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from config import AppConfig
 from graph.checkpoints import build_sqlite_checkpointer
-from llm.groq_client import complete_chat_completion
+from llm.groq_client import MetricsCallback, complete_chat_completion
 from multi_agent.agents.base import AgentConfig, LLMCall
 from multi_agent.agents.manager import ManagerAgent
 from multi_agent.agents.researcher import ResearcherAgent
@@ -50,28 +50,43 @@ class MultiAgentRuntime:
         rag_top_k: int,
         rag_min_score: float,
         llm_call: LLMCall | None = None,
+        final_model: str | None = None,
+        final_max_tokens: int | None = None,
+        latency_callback: MetricsCallback | None = None,
     ) -> None:
         self.config = config
         self.tool_manager = tool_manager
-        call = llm_call or self._build_llm_call(model, temperature, max_tokens)
+        fast_call = llm_call or self._build_llm_call(
+            model, temperature, max_tokens, latency_callback
+        )
+        final_call = llm_call or self._build_llm_call(
+            final_model or config.groq_final_model,
+            temperature,
+            final_max_tokens or config.default_max_tokens,
+            latency_callback,
+        )
         timeout = config.multi_agent_timeout_seconds
         retries = config.multi_agent_output_repair_attempts
         self.manager = ManagerAgent(
-            AgentConfig("manager", MANAGER_SYSTEM_PROMPT, model, 0.1, max_tokens, timeout, retries), call
+            AgentConfig(
+                "manager", MANAGER_SYSTEM_PROMPT, final_model or config.groq_final_model,
+                0.1, final_max_tokens or config.default_max_tokens, timeout, retries,
+            ),
+            final_call,
         )
         self.researcher = ResearcherAgent(
             AgentConfig(
                 "researcher", RESEARCHER_SYSTEM_PROMPT, model, 0.1, max_tokens, timeout, retries,
                 allowed_tools=("search.web",), allow_rag=True,
             ),
-            call,
+            fast_call,
         )
         self.writer = WriterAgent(
             AgentConfig("writer", WRITER_SYSTEM_PROMPT, model, temperature, max_tokens, timeout, retries, allow_memory=True),
-            call,
+            fast_call,
         )
         self.reviewer = ReviewerAgent(
-            AgentConfig("reviewer", REVIEWER_SYSTEM_PROMPT, model, 0.0, max_tokens, timeout, retries), call
+            AgentConfig("reviewer", REVIEWER_SYSTEM_PROMPT, model, 0.0, max_tokens, timeout, retries), fast_call
         )
         self.checkpointer = build_sqlite_checkpointer(config.multi_agent_checkpoint_db_path)
         self.graph = build_multi_agent_graph(
@@ -144,7 +159,13 @@ class MultiAgentRuntime:
             values=values,
         )
 
-    def _build_llm_call(self, model: str, temperature: float, max_tokens: int) -> LLMCall:
+    def _build_llm_call(
+        self,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        latency_callback: MetricsCallback | None,
+    ) -> LLMCall:
         def call(messages: list[dict[str, str]], timeout_seconds: int) -> str:
             # Each specialist gets a bounded provider timeout. The deadline is a
             # runtime contract, not a suggestion left to an individual prompt.
@@ -155,6 +176,7 @@ class MultiAgentRuntime:
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                on_metrics=latency_callback,
             )
 
         return call

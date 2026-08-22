@@ -8,7 +8,7 @@ from config import AppConfig
 from executor.executor import TaskExecutor
 from executor.retry_policy import RetryPolicy
 from executor.task_runner import MemorySearchFn, TaskRunner
-from llm.groq_client import complete_chat_completion
+from llm.groq_client import MetricsCallback, complete_chat_completion
 from planner.goal_evaluator import GoalEvaluator
 from planner.models import PlanState
 from planner.plan_validator import CapabilityCatalog, PlanValidator
@@ -33,9 +33,12 @@ def build_planning_runtime(
     rag_min_score: float,
     long_term_memory_context: dict[str, Any] | None,
     memory_search_fn: MemorySearchFn | None,
+    final_model: str | None = None,
+    final_max_tokens: int | None = None,
     approval_service: ApprovalService | None = None,
     approval_user_id: str = "local-user",
     graph_managed_task_retries: bool = False,
+    latency_callback: MetricsCallback | None = None,
 ) -> PlanningRuntime:
     """Build the Stage 7/8 services without deciding how they are orchestrated.
 
@@ -51,6 +54,7 @@ def build_planning_runtime(
             model=model,
             temperature=config.planner_temperature,
             max_tokens=max(max_tokens, config.planner_min_output_tokens),
+            on_metrics=latency_callback,
         )
 
     def execution_llm(messages: list[dict[str, str]]) -> str:
@@ -60,6 +64,17 @@ def build_planning_runtime(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
+            on_metrics=latency_callback,
+        )
+
+    def final_synthesis_llm(messages: list[dict[str, str]]) -> str:
+        return complete_chat_completion(
+            config=config,
+            messages=messages,
+            model=final_model or config.groq_final_model,
+            temperature=temperature,
+            max_tokens=final_max_tokens or config.default_max_tokens,
+            on_metrics=latency_callback,
         )
 
     active_tools = tool_manager.get_active_tool_descriptions()
@@ -116,7 +131,7 @@ def build_planning_runtime(
         planner=planner,
         scheduler=TaskScheduler(),
         executor=executor,
-        evaluator=GoalEvaluator(planning_llm),
+        evaluator=GoalEvaluator(planning_llm, final_synthesis_llm),
         replanner=replanner,
         catalog=catalog,
         max_plan_revisions=config.planner_max_revisions,
@@ -143,16 +158,21 @@ def run_planned_agent(
     rag_min_score: float,
     long_term_memory_context: dict[str, Any] | None,
     memory_search_fn: MemorySearchFn | None,
+    final_model: str | None = None,
+    final_max_tokens: int | None = None,
     status_callback: StatusCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
     approval_service: ApprovalService | None = None,
     approval_user_id: str = "local-user",
     existing_state: PlanState | None = None,
+    latency_callback: MetricsCallback | None = None,
 ) -> PlanState:
     runtime = build_planning_runtime(
         config=config,
         conversation_context=conversation_context,
         model=model,
+        final_model=final_model,
+        final_max_tokens=final_max_tokens,
         temperature=temperature,
         max_tokens=max_tokens,
         tool_manager=tool_manager,
@@ -163,6 +183,7 @@ def run_planned_agent(
         memory_search_fn=memory_search_fn,
         approval_service=approval_service,
         approval_user_id=approval_user_id,
+        latency_callback=latency_callback,
     )
     if existing_state is not None:
         return runtime.resume(
