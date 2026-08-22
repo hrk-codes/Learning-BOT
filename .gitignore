@@ -21,3 +21,12 @@ documents/raw/*
 !documents/raw/.gitkeep
 vector_store/*
 !vector_store/.gitkeep
+platform_data/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.coverage
+htmlcov/

@@ -1,16 +1,19 @@
-# Learning-BOT: AI Systems Engineering, Stages 1-10
+# Learning-BOT: AI Systems Engineering, Stages 1-11
 
-Learning-BOT is one continuously evolving Streamlit project built to understand AI
+Learning-BOT is one continuously evolving AI systems project built to understand AI
 systems from first principles. It began as one raw HTTP request to a Groq LLM and now
 includes conversation history, a bounded agent runtime, controlled tools, document RAG,
 governed long-term memory, validated multi-step planning, version-locked human approval for
-consequential actions, and a durable LangGraph orchestration layer for complex workflows.
+consequential actions, a durable LangGraph orchestration layer for complex workflows, and
+now a production-oriented web platform around that intelligence.
 
 The goal is not to collect popular frameworks. Each stage adds one capability only after
 the limitation of the previous stage becomes clear.
 
 The current free-only routing and measurement strategy is documented in
 [Latency Optimization](docs/LATENCY_OPTIMIZATION.md).
+The production architecture and verification walkthrough are documented in
+[Stage 11 Production Platform](docs/STAGE11_PRODUCTION_PLATFORM.md).
 
 ## Learning Journey
 
@@ -26,8 +29,26 @@ The current free-only routing and measurement strategy is documented in
 | 8 | Human approval and risk control | How can a plan pause safely before a consequential action? | The model proposes; runtime policy validates; the human approves one exact version; the executor records the outcome. |
 | 9 | LangGraph orchestration | How can branching, loops, retries, approvals, and recovery remain visible as workflows grow? | LangGraph coordinates existing services through explicit state, nodes, edges, interrupts, and checkpoints. |
 | 10 | Multi-agent system | When does a complex goal benefit from specialist responsibilities? | A manager delegates through explicit contracts; specialists return structured artifacts; more agents must justify their coordination cost. |
+| 11 | Production agent platform | How can multiple users operate the agent reliably outside a prototype UI? | Intelligence becomes a product through identity, durable state, async work, isolation, observability, deployment, and lifecycle contracts. |
 
-## Current Architecture
+## Current Platform Architecture
+
+```text
+React operations workspace -> FastAPI /api/v1 -> PostgreSQL durable state
+                                      |                 |
+                                      |                 v
+                                      +----------> background worker
+                                                        |
+                                                        v
+                                         Stage 10 multi-agent intelligence
+                                        / memory / RAG / governed tools
+```
+
+The original Streamlit interface remains a learning and debugging surface. Stage 11 adds
+the separate `frontend/` product UI and `platform_api/` service boundary. PostgreSQL is
+used in Compose and production; local development can use SQLite at no cost.
+
+## Stage 1-10 Intelligence Architecture
 
 ```text
                                       USER

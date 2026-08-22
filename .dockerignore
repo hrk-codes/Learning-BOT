@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+platform_data
+frontend/node_modules
+frontend/dist
+social
+memory/*.db*
+approval/*.db*
+graph/*.db*
+multi_agent/*.db*
+documents/raw/*
+vector_store/*

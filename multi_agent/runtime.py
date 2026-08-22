@@ -111,6 +111,7 @@ class MultiAgentRuntime:
         conversation_context: list[dict[str, str]],
         memory_context: dict[str, Any] | None,
         knowledge_base: dict[str, Any],
+        on_trace_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> MultiAgentRunResult:
         run_id = f"run_{uuid.uuid4().hex}"
         thread_id = f"stage10_{uuid.uuid4().hex}"
@@ -147,7 +148,22 @@ class MultiAgentRuntime:
             "agent_results": [],
             "node_trace": [],
         }
-        self.graph.invoke(initial, self._graph_config(thread_id))
+        if on_trace_event is None:
+            self.graph.invoke(initial, self._graph_config(thread_id))
+        else:
+            for update in self.graph.stream(
+                initial,
+                self._graph_config(thread_id),
+                stream_mode="updates",
+            ):
+                if not isinstance(update, dict):
+                    continue
+                for node_update in update.values():
+                    if not isinstance(node_update, dict):
+                        continue
+                    for event in node_update.get("node_trace", []):
+                        if isinstance(event, dict):
+                            on_trace_event(event)
         return self.get_run(thread_id)
 
     def get_run(self, thread_id: str) -> MultiAgentRunResult:
