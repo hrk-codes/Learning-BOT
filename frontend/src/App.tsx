@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Activity, Archive, ArrowUp, BarChart3, Bell, Bot, Brain, Check, CheckCircle2, ChevronRight,
-  CircleAlert, CircleStop, Database, FileText, Gauge, KeyRound, LayoutDashboard, LogOut,
+  CircleAlert, CircleStop, Database, FileText, Gauge, KeyRound, Layers3, LayoutDashboard, LogOut,
   Menu, Network, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Trash2,
   Upload, Users, Wrench, X, XCircle, Zap,
 } from 'lucide-react'
@@ -10,15 +10,15 @@ import type { Analytics, Approval, Document, MemoryRecord, Run, Session, Tool } 
 
 type View = 'mission' | 'runs' | 'knowledge' | 'memory' | 'toolbox' | 'approvals' | 'insights' | 'settings'
 
-const navigation: { id: View; label: string; icon: typeof Activity }[] = [
-  { id: 'mission', label: 'Home', icon: LayoutDashboard },
-  { id: 'runs', label: 'Activity', icon: Network },
-  { id: 'knowledge', label: 'Library', icon: Database },
-  { id: 'memory', label: 'Memory', icon: Brain },
-  { id: 'toolbox', label: 'Capabilities', icon: Wrench },
-  { id: 'approvals', label: 'Needs review', icon: ShieldCheck },
-  { id: 'insights', label: 'Patterns', icon: BarChart3 },
-  { id: 'settings', label: 'Settings', icon: Settings },
+const navigation: { id: View; label: string; icon: typeof Activity; detail: string; tone: string }[] = [
+  { id: 'mission', label: 'Home', icon: LayoutDashboard, detail: 'Start and guide a goal', tone: 'cyan' },
+  { id: 'runs', label: 'Activity', icon: Network, detail: 'Follow every execution', tone: 'blue' },
+  { id: 'knowledge', label: 'Library', icon: Database, detail: 'Ground work in sources', tone: 'amber' },
+  { id: 'memory', label: 'Memory', icon: Brain, detail: 'Carry useful context', tone: 'violet' },
+  { id: 'toolbox', label: 'Capabilities', icon: Wrench, detail: 'Control available tools', tone: 'teal' },
+  { id: 'approvals', label: 'Reviews', icon: ShieldCheck, detail: 'Approve sensitive actions', tone: 'coral' },
+  { id: 'insights', label: 'Patterns', icon: BarChart3, detail: 'Understand performance', tone: 'lime' },
+  { id: 'settings', label: 'Settings', icon: Settings, detail: 'Shape your workspace', tone: 'slate' },
 ]
 
 const emptyAnalytics: Analytics = {
@@ -33,6 +33,7 @@ export default function App() {
   })
   const [view, setView] = useState<View>('mission')
   const [mobileNav, setMobileNav] = useState(false)
+  const [deckOpen, setDeckOpen] = useState(false)
   const [runs, setRuns] = useState<Run[]>([])
   const [tools, setTools] = useState<Tool[]>([])
   const [memories, setMemories] = useState<MemoryRecord[]>([])
@@ -62,6 +63,19 @@ export default function App() {
 
   useEffect(() => { void loadData() }, [loadData])
   useEffect(() => {
+    function handleShortcut(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const editing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT'
+      if (event.key === 'Escape') { setDeckOpen(false); setMobileNav(false) }
+      if (event.key === '/' && !editing) { event.preventDefault(); setDeckOpen(current => !current) }
+      if (event.altKey && /^[1-8]$/.test(event.key)) {
+        event.preventDefault(); setView(navigation[Number(event.key) - 1].id); setDeckOpen(false)
+      }
+    }
+    window.addEventListener('keydown', handleShortcut)
+    return () => window.removeEventListener('keydown', handleShortcut)
+  }, [])
+  useEffect(() => {
     if (!session || !runs.some(run => ['queued', 'running'].includes(run.status))) return
     const timer = window.setInterval(() => void loadData(true), 2500)
     return () => window.clearInterval(timer)
@@ -78,26 +92,29 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
-        <div className="brand"><div className="brand-mark"><Sparkles size={18} /></div><div><strong>Learning BOT</strong><span>Your thinking workspace</span></div></div>
-        <nav aria-label="Platform sections">
-          {navigation.map(item => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setMobileNav(false) }}><item.icon size={18} /><span>{item.label}</span>{item.id === 'approvals' && pendingApprovals > 0 && <b>{pendingApprovals}</b>}</button>)}
-        </nav>
-        <div className="sidebar-foot">
-          <div className="service-state"><span className="live-dot" /><div><strong>Everything is ready</strong><small>Stage 11 · local workspace</small></div></div>
-          <button className="profile-button" onClick={() => setView('settings')}><span>{initials(session.user.display_name)}</span><div><strong>{session.user.display_name}</strong><small>{session.user.role}</small></div><ChevronRight size={16} /></button>
+      <header className="topbar">
+        <div className="topbar-inner">
+          <button className="brand" onClick={() => { setView('mission'); setDeckOpen(false) }}><span className="brand-mark"><Sparkles size={18} /></span><span><strong>Learning BOT</strong><small>agent workspace</small></span></button>
+          <nav className="desktop-nav" aria-label="Workspace sections">
+            {navigation.map(item => <button key={item.id} className={`${view === item.id ? 'active' : ''} tone-${item.tone}`} onClick={() => { setView(item.id); setDeckOpen(false) }}><item.icon size={16} /><span>{item.label}</span>{item.id === 'approvals' && pendingApprovals > 0 && <b>{pendingApprovals}</b>}</button>)}
+          </nav>
+          <div className="top-actions">
+            <button className={`deck-trigger ${deckOpen ? 'active' : ''}`} title="Open workspace map" onClick={() => setDeckOpen(current => !current)}><Search size={16} /><span>Navigate</span><kbd>/</kbd></button>
+            <button className="icon-button" title="Refresh workspace" onClick={() => void loadData()}><RefreshCw size={17} className={loading ? 'spinning' : ''} /></button>
+            <button className="icon-button" title="Items that need your attention"><Bell size={17} />{pendingApprovals > 0 && <i />}</button>
+            <button className="profile-orb" title="Open settings" onClick={() => setView('settings')}>{initials(session.user.display_name)}</button>
+            <button className="icon-button mobile-menu" title="Open navigation" onClick={() => setMobileNav(current => !current)}><Menu size={19} /></button>
+          </div>
         </div>
-      </aside>
+      </header>
+      {deckOpen && <WorkspaceDeck active={view} approvals={pendingApprovals} analytics={analytics} onSelect={item => { setView(item); setDeckOpen(false) }} onClose={() => setDeckOpen(false)} />}
+      {mobileNav && <div className="mobile-drawer"><div><span>Move through the workspace</span><button className="icon-button" onClick={() => setMobileNav(false)}><X size={18} /></button></div>{navigation.map(item => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setMobileNav(false) }}><span className={`nav-symbol tone-${item.tone}`}><item.icon size={17} /></span><span><strong>{item.label}</strong><small>{item.detail}</small></span>{item.id === 'approvals' && pendingApprovals > 0 && <b>{pendingApprovals}</b>}<ChevronRight size={15} /></button>)}</div>}
       {mobileNav && <button aria-label="Close navigation" className="nav-scrim" onClick={() => setMobileNav(false)} />}
       <main>
-        <header className="topbar">
-          <button className="icon-button mobile-menu" title="Open navigation" onClick={() => setMobileNav(true)}><Menu size={20} /></button>
-          <div className="context-title"><span>{navigation.find(item => item.id === view)?.label}</span><strong>{session.workspace.name}</strong></div>
-          <div className="top-actions"><span className="sync-state"><i />Up to date</span><button className="icon-button" title="Refresh workspace" onClick={() => void loadData()}><RefreshCw size={18} className={loading ? 'spinning' : ''} /></button><button className="icon-button" title="Items that need your attention"><Bell size={18} />{pendingApprovals > 0 && <i />}</button></div>
-        </header>
         {error && <div className="global-error"><CircleAlert size={17} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
-        <div className="workspace">
-          {view === 'mission' && <MissionView session={session} runs={runs} analytics={analytics} onSelect={selectRun} onCreated={watchRun} />}
+        <div className={`workspace view-${view}`}>
+          <div className="view-stage" key={view}>
+          {view === 'mission' && <MissionView session={session} runs={runs} analytics={analytics} onSelect={selectRun} onCreated={watchRun} onNavigate={setView} />}
           {view === 'runs' && <RunsView session={session} runs={runs} selected={selectedRun} onSelect={selectRun} onRefresh={() => void loadData()} />}
           {view === 'knowledge' && <KnowledgeView session={session} documents={documents} refresh={loadData} />}
           {view === 'memory' && <MemoryView session={session} memories={memories} refresh={loadData} />}
@@ -105,6 +122,7 @@ export default function App() {
           {view === 'approvals' && <ApprovalsView session={session} approvals={approvals} refresh={loadData} />}
           {view === 'insights' && <InsightsView analytics={analytics} runs={runs} />}
           {view === 'settings' && <SettingsView session={session} onLogout={logout} />}
+          </div>
         </div>
       </main>
     </div>
@@ -118,6 +136,10 @@ export default function App() {
     const controller = new AbortController()
     void streamRunEvents(session!.access_token, run.id, () => void loadData(true), controller.signal).catch(() => undefined)
   }
+}
+
+function WorkspaceDeck({ active, approvals, analytics, onSelect, onClose }: { active: View; approvals: number; analytics: Analytics; onSelect: (view: View) => void; onClose: () => void }) {
+  return <><button className="deck-scrim" aria-label="Close workspace map" onClick={onClose} /><section className="workspace-deck"><div className="deck-content"><div className="deck-summary"><p className="eyebrow">Workspace map</p><h2>Move between every layer of your agent system.</h2><p>Each area exposes a different part of the same durable workflow, without losing the current run or context.</p><div className="deck-signals"><span><i />{analytics.active_runs} active</span><span>{analytics.total_runs} total runs</span><span>{approvals} awaiting review</span></div></div><div className="deck-grid">{navigation.map((item, index) => <button key={item.id} className={`${active === item.id ? 'active' : ''} tone-${item.tone}`} onClick={() => onSelect(item.id)}><span className="nav-symbol"><item.icon size={18} /></span><span><strong>{item.label}</strong><small>{item.detail}</small></span><kbd>Alt {index + 1}</kbd></button>)}</div></div></section></>
 }
 
 function AuthScreen({ onSuccess }: { onSuccess: (session: Session) => void }) {
@@ -159,7 +181,7 @@ function AuthScreen({ onSuccess }: { onSuccess: (session: Session) => void }) {
   </div>
 }
 
-function MissionView({ session, runs, analytics, onSelect, onCreated }: { session: Session; runs: Run[]; analytics: Analytics; onSelect: (id: string) => void; onCreated: (run: Run) => void }) {
+function MissionView({ session, runs, analytics, onSelect, onCreated, onNavigate }: { session: Session; runs: Run[]; analytics: Analytics; onSelect: (id: string) => void; onCreated: (run: Run) => void; onNavigate: (view: View) => void }) {
   const [goal, setGoal] = useState('')
   const [mode, setMode] = useState('auto')
   const [busy, setBusy] = useState(false)
@@ -168,30 +190,44 @@ function MissionView({ session, runs, analytics, onSelect, onCreated }: { sessio
     try { const run = await api.createRun(session.access_token, session.workspace.id, goal, mode); setGoal(''); onCreated(run) } finally { setBusy(false) }
   }
   const suggestions = [
-    'Help me compare a technical decision with clear tradeoffs',
+    'Compare a technical decision with clear tradeoffs',
     'Turn an early product idea into a practical plan',
     'Review a proposal for risks and missing assumptions',
   ]
   return <div className="mission-experience">
+    <div className="ambient-capabilities" aria-hidden="true">
+      <span className="float-cap cap-plan"><Network size={20} /><small>Plan</small></span>
+      <span className="float-cap cap-recall"><Brain size={20} /><small>Recall</small></span>
+      <span className="float-cap cap-ground"><Database size={20} /><small>Ground</small></span>
+      <span className="float-cap cap-act"><Wrench size={20} /><small>Act</small></span>
+      <span className="float-cap cap-review"><ShieldCheck size={20} /><small>Review</small></span>
+      <span className="float-cap cap-trace"><Activity size={20} /><small>Trace</small></span>
+    </div>
     <section className="mission-hero">
       <div className="mission-intro">
-        <div className="core-status"><span><Sparkles size={14} /></span><b>Your team is ready</b><i />Stage 11</div>
-        <h1>Good {daypart()}, {firstName(session.user.display_name)}.<br /><span>What would you like to move forward?</span></h1>
-        <p>Share the outcome in your own words. Your agent team will organize the work, bring in the right context, and keep you close to every meaningful decision.</p>
+        <div className="agent-emblem"><Layers3 size={24} /><span /></div>
+        <div className="core-status"><i /><b>Stage 11 is ready</b><span>·</span>one goal, coordinated execution</div>
       </div>
       <form className="ai-composer" onSubmit={launch}>
-        <div className="composer-glow" />
-        <textarea value={goal} onChange={e => setGoal(e.target.value)} maxLength={12000} placeholder="Describe what you would like help thinking through..." aria-label="Describe your goal" />
+        <Search size={20} className="composer-search" />
+        <textarea value={goal} onChange={e => setGoal(e.target.value)} maxLength={12000} placeholder="Give your agent team a goal..." aria-label="Describe your goal" />
         <div className="composer-footer">
-          <div className="segmented" aria-label="Mission mode">{['auto', 'research', 'write', 'review'].map(item => <button type="button" className={mode === item ? 'selected' : ''} onClick={() => setMode(item)} key={item}>{item}</button>)}</div>
-          <div className="composer-meta"><span>{goal.length.toLocaleString()} / 12k</span><button className="send-button" title="Start this work" disabled={busy || goal.trim().length < 3}>{busy ? <RefreshCw size={18} className="spinning" /> : <ArrowUp size={19} />}</button></div>
+          <div className="composer-meta"><span>{goal.length.toLocaleString()} / 12k</span><button className="send-button" title="Start this work" disabled={busy || goal.trim().length < 3}>{busy ? <RefreshCw size={17} className="spinning" /> : <><Zap size={15} /><b>Start</b></>}</button></div>
         </div>
       </form>
+      <div className="mission-intro mission-copy">
+        <h1>Turn one goal into<br /><span>coordinated action.</span></h1>
+        <p>Plan, research, remember, use tools, ask for approval, and deliver a reviewed result through one visible workflow.</p>
+      </div>
+      <div className="segmented mode-rail" aria-label="Mission mode">{['auto', 'research', 'write', 'review'].map(item => <button type="button" className={mode === item ? 'selected' : ''} onClick={() => setMode(item)} key={item}>{item === 'auto' ? <Sparkles size={13} /> : item === 'research' ? <Search size={13} /> : item === 'write' ? <FileText size={13} /> : <ShieldCheck size={13} />}{item}</button>)}</div>
       <div className="prompt-suggestions">{suggestions.map((item, index) => <button key={item} onClick={() => setGoal(item)}><span>0{index + 1}</span>{item}<ChevronRight size={14} /></button>)}</div>
+      <div className="stage-launchers">
+        {navigation.slice(1, 7).map(item => <button key={item.id} onClick={() => onNavigate(item.id)} className={`tone-${item.tone}`}><span className="nav-symbol"><item.icon size={19} /></span><strong>{item.label}</strong><small>{item.detail}</small></button>)}
+      </div>
     </section>
 
     <section className="system-pulse">
-      <div className="pulse-heading"><div><p className="eyebrow">How your team works</p><h2>One coordinator, with specialists when you need them.</h2></div><span className="latency-signal"><Zap size={14} /> Thoughtful model routing</span></div>
+      <div className="pulse-heading"><div><p className="eyebrow">Live architecture</p><h2>One coordinator, with specialists when the work needs them.</h2></div><span className="latency-signal"><i /> system synchronized</span></div>
       <div className="pulse-layout"><AgentTopology /><div className="metric-strip">
         <Metric label="Active" value={analytics.active_runs} detail={analytics.active_runs ? 'Processing now' : 'Queue clear'} tone="teal" />
         <Metric label="Success" value={`${analytics.total_runs ? Math.round(analytics.completed_runs / analytics.total_runs * 100) : 0}%`} detail={`${analytics.completed_runs} completed`} />
@@ -252,7 +288,7 @@ function ToolboxView({ session, tools, refresh }: { session: Session; tools: Too
 function ApprovalsView({ session, approvals, refresh }: { session: Session; approvals: Approval[]; refresh: (quiet?: boolean) => Promise<void> }) {
   const pending = approvals.filter(item => item.status === 'pending'); const decided = approvals.filter(item => item.status !== 'pending')
   async function decide(id: string, decision: 'approved' | 'rejected') { await api.decideApproval(session.access_token, id, decision); await refresh() }
-  return <><PageHeading eyebrow="You remain in control" title="Needs review" description="Review the exact action before anything sensitive happens. Each approval applies once, to the version you can see." />
+  return <><PageHeading eyebrow="You remain in control" title="Reviews" description="Review the exact action before anything sensitive happens. Each approval applies once, to the version you can see." />
     <div className="approval-banner"><ShieldCheck size={25} /><div><strong>{pending.length} actions waiting</strong><span>Nothing sensitive will happen until you decide.</span></div></div>
     <section className="data-section"><div className="section-header"><div><p className="eyebrow">Decision queue</p><h2>Pending</h2></div></div>{pending.length ? pending.map(item => <div className="approval-row" key={item.id}><div><span className="risk-label">Review required</span><h3>{item.summary}</h3><small>{item.action_type} · run {item.run_id.slice(-8)}</small><pre>{JSON.stringify(item.proposal, null, 2)}</pre></div><div><button className="secondary-button" onClick={() => void decide(item.id, 'rejected')}><XCircle size={16} />Reject</button><button className="primary-button" onClick={() => void decide(item.id, 'approved')}><Check size={16} />Approve once</button></div></div>) : <Empty icon={ShieldCheck} title="Approval queue clear" text="No agent action is currently waiting for human authority." />}</section>
     {decided.length > 0 && <section className="data-section"><div className="section-header"><div><p className="eyebrow">Audit history</p><h2>Decisions</h2></div></div>{decided.map(item => <div className="compact-row" key={item.id}><Status status={item.status} /><strong>{item.summary}</strong><small>{date(item.decided_at ?? item.created_at)}</small></div>)}</section>}
